@@ -85,23 +85,6 @@
 //! # }
 //! ```
 //!
-//! Again, like `std::thread`'s [`JoinHandle` type][thread_join], if the spawned
-//! task panics, awaiting its `JoinHandle` will return a [`JoinError`]`. For
-//! example:
-//!
-//! ```
-//! use tokio::task;
-//!
-//! # #[tokio::main] async fn main() {
-//! let join = task::spawn(async {
-//!     panic!("something bad happened!")
-//! });
-//!
-//! // The returned result indicates that the task failed.
-//! assert!(join.await.is_err());
-//! # }
-//! ```
-//!
 //! `spawn`, `JoinHandle`, and `JoinError` are present when the "rt-core"
 //! feature flag is enabled.
 //!

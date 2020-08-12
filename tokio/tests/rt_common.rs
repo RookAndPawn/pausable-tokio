@@ -661,32 +661,6 @@ rt_test! {
     }
 
     #[test]
-    fn panic_in_task() {
-        let mut rt = rt();
-        let (tx, rx) = oneshot::channel();
-
-        struct Boom(Option<oneshot::Sender<()>>);
-
-        impl Future for Boom {
-            type Output = ();
-
-            fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
-                panic!();
-            }
-        }
-
-        impl Drop for Boom {
-            fn drop(&mut self) {
-                assert!(std::thread::panicking());
-                self.0.take().unwrap().send(()).unwrap();
-            }
-        }
-
-        rt.spawn(Boom(Some(tx)));
-        assert_ok!(rt.block_on(rx));
-    }
-
-    #[test]
     #[should_panic]
     fn panic_in_block_on() {
         let mut rt = rt();
