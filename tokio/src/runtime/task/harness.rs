@@ -86,7 +86,7 @@ where
         // future has been obtained. This also ensures the `*mut T` pointer
         // contains the future (as opposed to the output) and is initialized.
 
-        let res = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+        let res = {
             struct Guard<'a, T: Future, S: Schedule> {
                 core: &'a Core<T, S>,
             }
@@ -111,13 +111,13 @@ where
 
                 res.map(Ok)
             }
-        }));
+        };
 
         match res {
-            Ok(Poll::Ready(out)) => {
+            Poll::Ready(out) => {
                 self.complete(out, snapshot.is_join_interested());
             }
-            Ok(Poll::Pending) => {
+            Poll::Pending => {
                 match self.header().state.transition_to_idle() {
                     Ok(snapshot) => {
                         if snapshot.is_notified() {
@@ -130,9 +130,6 @@ where
                     }
                     Err(_) => self.cancel_task(),
                 }
-            }
-            Err(err) => {
-                self.complete(Err(JoinError::panic2(err)), snapshot.is_join_interested());
             }
         }
     }
