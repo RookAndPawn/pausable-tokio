@@ -205,6 +205,9 @@ cfg_blocking_impl! {
     pub(crate) use blocking::{spawn_blocking, try_spawn_blocking};
 }
 
+mod pausable_time_config;
+use pausable_time_config::PausableTimeConfig;
+
 mod builder;
 pub use self::builder::Builder;
 

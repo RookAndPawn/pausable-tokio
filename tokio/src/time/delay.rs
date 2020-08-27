@@ -53,7 +53,7 @@ pub fn delay_until(deadline: Instant) -> Delay {
 /// [`interval`]: crate::time::interval()
 #[cfg_attr(docsrs, doc(alias = "sleep"))]
 pub fn delay_for(duration: Duration) -> Delay {
-    delay_until(Instant::now() + duration)
+    delay_until(crate::runtime::Handle::current().now() + duration)
 }
 
 /// Future returned by [`delay_until`](delay_until) and

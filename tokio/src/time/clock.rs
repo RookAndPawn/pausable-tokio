@@ -6,36 +6,114 @@
 
 cfg_not_test_util! {
     use crate::time::{Duration, Instant};
+    use std::sync::{Arc, atomic::Ordering};
+    use pausable_clock::PausableClock;
 
     #[derive(Debug, Clone)]
-    pub(crate) struct Clock {}
+    pub(crate) struct Clock {
+        pausable: bool,
+        pausing_clock: Arc<PausableClock>
+    }
 
     pub(crate) fn now() -> Instant {
         Instant::from_std(std::time::Instant::now())
     }
 
     impl Clock {
+
+        pub(crate) fn is_test() -> bool {
+            false
+        }
+
         pub(crate) fn new() -> Clock {
-            Clock {}
+            Clock {
+                pausable: false,
+                pausing_clock: Arc::new(PausableClock::default())
+            }
+        }
+
+        pub(crate) fn new_pausable(paused: bool, elapsed_time: std::time::Duration) -> Clock {
+            Clock {
+                pausable: true,
+                pausing_clock: Arc::new(PausableClock::new(elapsed_time, paused))
+            }
+        }
+
+        pub(crate) fn pausable(&self) -> bool {
+            self.pausable
         }
 
         pub(crate) fn now(&self) -> Instant {
-            now()
+            if self.pausable {
+                Instant::from_std(self.pausing_clock.now_std())
+            }
+            else {
+                now()
+            }
         }
 
         pub(crate) fn is_paused(&self) -> bool {
-            false
+            if self.pausable {
+                self.pausing_clock.is_paused()
+            }
+            else {
+                false
+            }
+        }
+
+        pub(crate) fn is_paused_ordered(&self, ordering: Ordering) -> bool {
+            if self.pausable {
+                self.pausing_clock.is_paused_ordered(ordering)
+            }
+            else {
+                false
+            }
         }
 
         pub(crate) fn advance(&self, _dur: Duration) {
             unreachable!();
+        }
+
+        pub(crate) fn pause(&self) -> bool {
+            if self.pausable {
+                self.pausing_clock.pause()
+            }
+            else {
+                panic!("Not pausable");
+            }
+        }
+
+        pub(crate) fn resume(&self) -> bool {
+            if self.pausable {
+                self.pausing_clock.resume()
+            }
+            else {
+                panic!("Not pausable");
+            }
+        }
+
+        pub(crate) fn run_unpausable<T,F>(&self, action: F) -> T
+            where F : FnOnce() -> T
+        {
+            if self.pausable {
+                self.pausing_clock.run_unpausable(action)
+            }
+            else {
+                action()
+            }
+        }
+
+        pub(crate) fn wait_for_resume(&self) {
+            if self.pausable {
+                self.pausing_clock.wait_for_resume();
+            }
         }
     }
 }
 
 cfg_test_util! {
     use crate::time::{Duration, Instant};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{ Arc, Mutex, atomic::Ordering };
     use crate::runtime::context;
 
     /// A handle to a source of time.
@@ -89,6 +167,7 @@ cfg_test_util! {
         inner.unfrozen = Some(std::time::Instant::now());
     }
 
+
     /// Advance time
     ///
     /// Increments the saved `Instant::now()` value by `duration`. Subsequent
@@ -114,6 +193,12 @@ cfg_test_util! {
     }
 
     impl Clock {
+
+
+        pub(crate) fn is_test() -> bool {
+            true
+        }
+
         /// Return a new `Clock` instance that uses the current execution context's
         /// source of time.
         pub(crate) fn new() -> Clock {
@@ -127,17 +212,33 @@ cfg_test_util! {
             }
         }
 
-        pub(crate) fn pause(&self) {
+        #[allow(dead_code)]
+        pub(crate) fn new_pausable(_pausable: bool, _elapsed_time: std::time::Duration) -> Clock {
+            Self::new()
+        }
+
+        pub(crate) fn pause(&self) -> bool {
             let mut inner = self.inner.lock().unwrap();
 
             let elapsed = inner.unfrozen.as_ref().expect("time is already frozen").elapsed();
             inner.base += elapsed;
             inner.unfrozen = None;
+
+            true
         }
 
         pub(crate) fn is_paused(&self) -> bool {
             let inner = self.inner.lock().unwrap();
             inner.unfrozen.is_none()
+        }
+
+        pub(crate) fn is_paused_ordered(&self, _: Ordering) -> bool {
+            self.is_paused()
+        }
+
+        pub(crate) fn resume(&self) -> bool {
+            self.advance(Default::default());
+            true
         }
 
         pub(crate) fn advance(&self, duration: Duration) {
@@ -160,6 +261,17 @@ cfg_test_util! {
             }
 
             Instant::from_std(ret)
+        }
+
+        pub(crate) fn wait_for_resume(&self) {
+            unreachable!("Not implemented for tests")
+        }
+
+        #[allow(dead_code)]
+        pub(crate) fn run_unpausable<T,F>(&self, action: F) -> T
+            where F : FnOnce() -> T
+        {
+            action()
         }
     }
 }

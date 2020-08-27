@@ -10,6 +10,7 @@ mod variant {
     use crate::park::Either;
     use crate::runtime::io;
     use crate::time::{self, driver};
+    use std::time::Duration;
 
     pub(crate) type Clock = time::Clock;
     pub(crate) type Driver = Either<driver::Driver<io::Driver>, io::Driver>;
@@ -17,6 +18,11 @@ mod variant {
 
     pub(crate) fn create_clock() -> Clock {
         Clock::new()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn create_pausable_clock(paused: bool, elapsed_time: Duration) -> Clock {
+        Clock::new_pausable(paused, elapsed_time)
     }
 
     /// Create a new timer driver / handle pair

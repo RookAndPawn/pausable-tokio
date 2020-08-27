@@ -1,9 +1,8 @@
 use crate::runtime::handle::Handle;
 use crate::runtime::shell::Shell;
-use crate::runtime::{blocking, io, time, Callback, Runtime, Spawner};
+use crate::runtime::{blocking, io, time, Callback, PausableTimeConfig, Runtime, Spawner};
 
 use std::fmt;
-#[cfg(not(loom))]
 use std::sync::Arc;
 
 /// Builds Tokio Runtime with custom configuration values.
@@ -47,6 +46,9 @@ pub struct Builder {
     /// Whether or not to enable the time driver
     enable_time: bool,
 
+    /// Whether or not time is pausable and how to start the system
+    pausable_time_cfg: Option<PausableTimeConfig>,
+
     /// The number of worker threads, used by Runtime.
     ///
     /// Only used when not using the current-thread executor.
@@ -55,8 +57,8 @@ pub struct Builder {
     /// Cap on thread usage.
     max_threads: usize,
 
-    /// Name used for threads spawned by the runtime.
-    pub(super) thread_name: String,
+    /// Name fn used for threads spawned by the runtime.
+    pub(super) thread_name: ThreadNameFn,
 
     /// Stack size used for threads spawned by the runtime.
     pub(super) thread_stack_size: Option<usize>,
@@ -67,6 +69,8 @@ pub struct Builder {
     /// To run before each worker thread stops
     pub(super) before_stop: Option<Callback>,
 }
+
+pub(crate) type ThreadNameFn = Arc<dyn Fn() -> String + Send + Sync + 'static>;
 
 #[derive(Debug, Clone, Copy)]
 enum Kind {
@@ -93,13 +97,15 @@ impl Builder {
             // Time defaults to "off"
             enable_time: false,
 
+            pausable_time_cfg: None,
+
             // Default to lazy auto-detection (one thread per CPU core)
             core_threads: None,
 
             max_threads: 512,
 
             // Default thread name
-            thread_name: "tokio-runtime-worker".into(),
+            thread_name: Arc::new(|| "tokio-runtime-worker".into()),
 
             // Do not set a stack size by default
             thread_stack_size: None,
@@ -210,7 +216,36 @@ impl Builder {
     /// # }
     /// ```
     pub fn thread_name(&mut self, val: impl Into<String>) -> &mut Self {
-        self.thread_name = val.into();
+        let val = val.into();
+        self.thread_name = Arc::new(move || val.clone());
+        self
+    }
+
+    /// Sets a function used to generate the name of threads spawned by the `Runtime`'s thread pool.
+    ///
+    /// The default name fn is `|| "tokio-runtime-worker".into()`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use tokio::runtime;
+    /// # use std::sync::atomic::{AtomicUsize, Ordering};
+    ///
+    /// # pub fn main() {
+    /// let rt = runtime::Builder::new()
+    ///     .thread_name_fn(|| {
+    ///        static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
+    ///        let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
+    ///        format!("my-pool-{}", id)
+    ///     })
+    ///     .build();
+    /// # }
+    /// ```
+    pub fn thread_name_fn<F>(&mut self, f: F) -> &mut Self
+    where
+        F: Fn() -> String + Send + Sync + 'static,
+    {
+        self.thread_name = Arc::new(f);
         self
     }
 
@@ -391,6 +426,19 @@ cfg_time! {
             self.enable_time = true;
             self
         }
+
+        /// Configure pausability of time
+        pub fn pausable_time(&mut self,
+            start_paused: bool,
+            elapsed_time: std::time::Duration
+        ) -> &mut Self
+        {
+            self.pausable_time_cfg = Some(PausableTimeConfig {
+                start_paused,
+                elapsed_time
+            });
+            self
+        }
     }
 }
 
@@ -469,11 +517,15 @@ cfg_rt_threaded! {
             let core_threads = self.core_threads.unwrap_or_else(|| cmp::min(self.max_threads, num_cpus()));
             assert!(core_threads <= self.max_threads, "Core threads number cannot be above max limit");
 
-            let clock = time::create_clock();
+            let clock = if let Some(pausable_config) = &self.pausable_time_cfg {
+                time::create_pausable_clock(pausable_config.start_paused, pausable_config.elapsed_time)
+            } else {
+                time::create_clock()
+            };
 
             let (io_driver, io_handle) = io::create_driver(self.enable_io)?;
             let (driver, time_handle) = time::create_driver(self.enable_time, io_driver, clock.clone());
-            let (scheduler, launch) = ThreadPool::new(core_threads, Parker::new(driver));
+            let (scheduler, launch) = ThreadPool::new(core_threads, Parker::new(driver), clock.clone());
             let spawner = Spawner::ThreadPool(scheduler.spawner().clone());
 
             // Create the blocking pool
@@ -513,7 +565,10 @@ impl fmt::Debug for Builder {
             .field("kind", &self.kind)
             .field("core_threads", &self.core_threads)
             .field("max_threads", &self.max_threads)
-            .field("thread_name", &self.thread_name)
+            .field(
+                "thread_name",
+                &"<dyn Fn() -> String + Send + Sync + 'static>",
+            )
             .field("thread_stack_size", &self.thread_stack_size)
             .field("after_start", &self.after_start.as_ref().map(|_| "..."))
             .field("before_stop", &self.after_start.as_ref().map(|_| "..."))
