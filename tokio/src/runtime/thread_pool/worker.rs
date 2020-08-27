@@ -14,6 +14,7 @@ use crate::runtime::thread_pool::{AtomicCell, Idle};
 use crate::runtime::{queue, task};
 use crate::util::linked_list::LinkedList;
 use crate::util::FastRand;
+use crate::time::Clock;
 
 use std::cell::RefCell;
 use std::time::Duration;
@@ -28,6 +29,8 @@ pub(super) struct Worker {
 
     /// Used to hand-off a worker's core to another thread.
     core: AtomicCell<Core>,
+
+    clock: Clock
 }
 
 /// Core data
@@ -104,6 +107,8 @@ struct Context {
 
     /// Core data
     core: RefCell<Option<Box<Core>>>,
+
+    clock: Clock
 }
 
 /// Starts the workers
@@ -123,7 +128,7 @@ type Notified = task::Notified<Arc<Worker>>;
 // Tracks thread-local state
 scoped_thread_local!(static CURRENT: Context);
 
-pub(super) fn create(size: usize, park: Parker) -> (Arc<Shared>, Launch) {
+pub(super) fn create(size: usize, park: Parker, clock: Clock) -> (Arc<Shared>, Launch) {
     let mut cores = vec![];
     let mut remotes = vec![];
 
@@ -142,7 +147,7 @@ pub(super) fn create(size: usize, park: Parker) -> (Arc<Shared>, Launch) {
             is_shutdown: false,
             tasks: LinkedList::new(),
             park: Some(park),
-            rand: FastRand::new(seed()),
+            rand: FastRand::new(seed())
         }));
 
         remotes.push(Remote {
@@ -166,6 +171,7 @@ pub(super) fn create(size: usize, park: Parker) -> (Arc<Shared>, Launch) {
             shared: shared.clone(),
             index,
             core: AtomicCell::new(Some(core)),
+            clock: clock.clone()
         }));
     }
 
@@ -291,10 +297,13 @@ fn run(worker: Arc<Worker>) {
         None => return,
     };
 
+    let clock = worker.clock.clone();
+
     // Set the worker context.
     let cx = Context {
         worker,
         core: RefCell::new(None),
+        clock
     };
 
     let _enter = crate::runtime::enter(true);
@@ -346,7 +355,7 @@ impl Context {
 
         // Run the task
         coop::budget(|| {
-            task.run();
+            self.clock.run_unpausable(|| task.run());
 
             // As long as there is budget remaining and a task exists in the
             // `lifo_slot`, then keep running.
@@ -367,7 +376,7 @@ impl Context {
                 if coop::has_budget_remaining() {
                     // Run the LIFO task, then loop
                     *self.core.borrow_mut() = Some(core);
-                    task.run();
+                    self.clock.run_unpausable(|| task.run());
                 } else {
                     // Not enough budget left to run the LIFO task, push it to
                     // the back of the queue and return.

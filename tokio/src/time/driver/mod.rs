@@ -251,6 +251,7 @@ where
 
         match self.wheel.poll_at() {
             Some(when) => {
+
                 let now = self.clock.now();
                 let deadline = self.expiration_instant(when);
 
@@ -258,8 +259,14 @@ where
                     let dur = deadline - now;
 
                     if self.clock.is_paused() {
-                        self.park.park_timeout(Duration::from_secs(0))?;
-                        self.clock.advance(dur);
+                        if Clock::is_test() {
+                            self.park.park_timeout(Duration::from_secs(0))?;
+                            self.clock.advance(dur);
+                        }
+                        else {
+                            self.clock.wait_for_resume();
+                            return self.park();
+                        }
                     } else {
                         self.park.park_timeout(dur)?;
                     }
@@ -289,8 +296,16 @@ where
                     let duration = cmp::min(deadline - now, duration);
 
                     if self.clock.is_paused() {
-                        self.park.park_timeout(Duration::from_secs(0))?;
-                        self.clock.advance(duration);
+                        if Clock::is_test() {
+                            self.park.park_timeout(Duration::from_secs(0))?;
+                            self.clock.advance(duration);
+                        }
+                        else {
+                            self.clock.wait_for_resume();
+                            // Park for the remainder of the duration?
+                            let remainder = duration.checked_sub(self.clock.now() - now);
+                            return self.park_timeout(remainder.unwrap_or_default());
+                        }
                     } else {
                         self.park.park_timeout(duration)?;
                     }

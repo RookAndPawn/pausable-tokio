@@ -16,6 +16,7 @@ cfg_blocking! {
 use crate::loom::sync::Arc;
 use crate::runtime::task::{self, JoinHandle};
 use crate::runtime::Parker;
+use crate::time::Clock;
 
 use std::fmt;
 use std::future::Future;
@@ -45,8 +46,8 @@ pub(crate) struct Spawner {
 // ===== impl ThreadPool =====
 
 impl ThreadPool {
-    pub(crate) fn new(size: usize, parker: Parker) -> (ThreadPool, Launch) {
-        let (shared, launch) = worker::create(size, parker);
+    pub(crate) fn new(size: usize, parker: Parker, clock: Clock) -> (ThreadPool, Launch) {
+        let (shared, launch) = worker::create(size, parker, clock);
         let spawner = Spawner { shared };
         let thread_pool = ThreadPool { spawner };
 

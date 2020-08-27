@@ -1,4 +1,5 @@
 use crate::runtime::{blocking, context, io, time, Spawner};
+use std::sync::atomic::Ordering;
 use std::{error, fmt};
 
 cfg_blocking! {
@@ -276,6 +277,41 @@ cfg_rt_core! {
                 let mut enter = crate::runtime::enter(true);
                 enter.block_on(future).expect("failed to park thread")
             })
+        }
+    }
+}
+
+cfg_time! {
+    impl Handle {
+
+        /// Get the current instant according to the runtime's clock
+        pub fn now(&self) -> crate::time::Instant {
+            self.clock.now()
+        }
+
+        /// Pause the runtime
+        pub fn pause(&self) -> bool {
+            self.clock.pause()
+        }
+
+        /// Is the runtime paused?
+        pub fn is_paused(&self) -> bool {
+            self.clock.is_paused()
+        }
+
+        /// Is the runtime paused using the given atomic ordering?
+        pub fn is_paused_ordered(&self, ordering: Ordering) -> bool {
+            self.clock.is_paused_ordered(ordering)
+        }
+
+        /// resume the runtime if it's paused
+        pub fn resume(&self) -> bool {
+            self.clock.resume()
+        }
+
+        /// Block _synchronously_ until the runtime resumes (if it's paused)
+        pub fn wait_for_resume(&self) {
+            self.clock.wait_for_resume()
         }
     }
 }

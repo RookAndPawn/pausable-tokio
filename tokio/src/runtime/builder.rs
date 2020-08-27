@@ -1,6 +1,6 @@
 use crate::runtime::handle::Handle;
 use crate::runtime::shell::Shell;
-use crate::runtime::{blocking, io, time, Callback, Runtime, Spawner};
+use crate::runtime::{blocking, io, time, Callback, PausableTimeConfig, Runtime, Spawner};
 
 use std::fmt;
 #[cfg(not(loom))]
@@ -47,6 +47,9 @@ pub struct Builder {
     /// Whether or not to enable the time driver
     enable_time: bool,
 
+    /// Whether or not time is pausable and how to start the system
+    pausable_time_cfg: Option<PausableTimeConfig>,
+
     /// The number of worker threads, used by Runtime.
     ///
     /// Only used when not using the current-thread executor.
@@ -92,6 +95,8 @@ impl Builder {
 
             // Time defaults to "off"
             enable_time: false,
+
+            pausable_time_cfg: None,
 
             // Default to lazy auto-detection (one thread per CPU core)
             core_threads: None,
@@ -391,6 +396,19 @@ cfg_time! {
             self.enable_time = true;
             self
         }
+
+        /// Configure pausability of time
+        pub fn pausable_time(&mut self,
+            start_paused: bool,
+            elapsed_time: std::time::Duration
+        ) -> &mut Self
+        {
+            self.pausable_time_cfg = Some(PausableTimeConfig {
+                start_paused,
+                elapsed_time
+            });
+            self
+        }
     }
 }
 
@@ -469,11 +487,15 @@ cfg_rt_threaded! {
             let core_threads = self.core_threads.unwrap_or_else(|| cmp::min(self.max_threads, num_cpus()));
             assert!(core_threads <= self.max_threads, "Core threads number cannot be above max limit");
 
-            let clock = time::create_clock();
+            let clock = if let Some(pausable_config) = &self.pausable_time_cfg {
+                time::create_pausable_clock(pausable_config.start_paused, pausable_config.elapsed_time)
+            } else {
+                time::create_clock()
+            };
 
             let (io_driver, io_handle) = io::create_driver(self.enable_io)?;
             let (driver, time_handle) = time::create_driver(self.enable_time, io_driver, clock.clone());
-            let (scheduler, launch) = ThreadPool::new(core_threads, Parker::new(driver));
+            let (scheduler, launch) = ThreadPool::new(core_threads, Parker::new(driver), clock.clone());
             let spawner = Spawner::ThreadPool(scheduler.spawner().clone());
 
             // Create the blocking pool
