@@ -289,6 +289,12 @@ cfg_time! {
             self.clock.now()
         }
 
+        /// Get the elapsed millis according to the pausable clock. This
+        /// function will panic if the runtime is not pausable
+        pub fn elapsed_millis(&self) -> u64 {
+            self.clock.elapsed_millis()
+        }
+
         /// Pause the runtime
         pub fn pause(&self) -> bool {
             self.clock.pause()

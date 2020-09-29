@@ -52,6 +52,15 @@ cfg_not_test_util! {
             }
         }
 
+        pub(crate) fn elapsed_millis(&self) -> u64 {
+            if self.pausable {
+                self.pausing_clock.now().elapsed_millis()
+            }
+            else {
+                panic!("elapsed time is not supported for non-pausable clocks")
+            }
+        }
+
         pub(crate) fn is_paused(&self) -> bool {
             if self.pausable {
                 self.pausing_clock.is_paused()
@@ -261,6 +270,10 @@ cfg_test_util! {
             }
 
             Instant::from_std(ret)
+        }
+
+        pub(crate) fn elapsed_millis(&self) -> u64 {
+            unreachable!("Not implemented for tests");
         }
 
         pub(crate) fn wait_for_resume(&self) {
