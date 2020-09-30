@@ -2,10 +2,8 @@ use crate::future::poll_fn;
 use crate::io::{AsyncRead, AsyncWrite, PollEvented, ReadBuf};
 use crate::net::tcp::split::{split, ReadHalf, WriteHalf};
 use crate::net::tcp::split_owned::{split_owned, OwnedReadHalf, OwnedWriteHalf};
-use crate::net::ToSocketAddrs;
+use crate::net::{to_socket_addrs, ToSocketAddrs};
 
-use bytes::Buf;
-use iovec::IoVec;
 use std::convert::TryFrom;
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -118,7 +116,7 @@ impl TcpStream {
     /// [`write_all`]: fn@crate::io::AsyncWriteExt::write_all
     /// [`AsyncWriteExt`]: trait@crate::io::AsyncWriteExt
     pub async fn connect<A: ToSocketAddrs>(addr: A) -> io::Result<TcpStream> {
-        let addrs = addr.to_socket_addrs().await?;
+        let addrs = to_socket_addrs(addr).await?;
 
         let mut last_err = None;
 
@@ -187,7 +185,7 @@ impl TcpStream {
     ///
     /// The runtime is usually set implicitly when this function is called
     /// from a future driven by a tokio runtime, otherwise runtime can be set
-    /// explicitly with [`Handle::enter`](crate::runtime::Handle::enter) function.
+    /// explicitly with [`Runtime::enter`](crate::runtime::Runtime::enter) function.
     pub fn from_std(stream: net::TcpStream) -> io::Result<TcpStream> {
         let io = mio::net::TcpStream::from_stream(stream)?;
         let io = PollEvented::new(io)?;
@@ -299,15 +297,16 @@ impl TcpStream {
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
-        ready!(self.io.poll_read_ready(cx, mio::Ready::readable()))?;
+        loop {
+            let ev = ready!(self.io.poll_read_ready(cx))?;
 
-        match self.io.get_ref().peek(buf) {
-            Ok(ret) => Poll::Ready(Ok(ret)),
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                self.io.clear_read_ready(cx, mio::Ready::readable())?;
-                Poll::Pending
+            match self.io.get_ref().peek(buf) {
+                Ok(ret) => return Poll::Ready(Ok(ret)),
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    self.io.clear_readiness(ev);
+                }
+                Err(e) => return Poll::Ready(Err(e)),
             }
-            Err(e) => Poll::Ready(Err(e)),
         }
     }
 
@@ -703,26 +702,28 @@ impl TcpStream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        ready!(self.io.poll_read_ready(cx, mio::Ready::readable()))?;
+        loop {
+            let ev = ready!(self.io.poll_read_ready(cx))?;
 
-        // Safety: `TcpStream::read` will not peak at the maybe uinitialized bytes.
-        let b =
-            unsafe { &mut *(buf.unfilled_mut() as *mut [std::mem::MaybeUninit<u8>] as *mut [u8]) };
-        match self.io.get_ref().read(b) {
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                self.io.clear_read_ready(cx, mio::Ready::readable())?;
-                Poll::Pending
-            }
-            Ok(n) => {
-                // Safety: We trust `TcpStream::read` to have filled up `n` bytes
-                // in the buffer.
-                unsafe {
-                    buf.assume_init(n);
+            // Safety: `TcpStream::read` will not peek at the maybe uinitialized bytes.
+            let b = unsafe {
+                &mut *(buf.unfilled_mut() as *mut [std::mem::MaybeUninit<u8>] as *mut [u8])
+            };
+            match self.io.get_ref().read(b) {
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    self.io.clear_readiness(ev);
                 }
-                buf.add_filled(n);
-                Poll::Ready(Ok(()))
+                Ok(n) => {
+                    // Safety: We trust `TcpStream::read` to have filled up `n` bytes
+                    // in the buffer.
+                    unsafe {
+                        buf.assume_init(n);
+                    }
+                    buf.add_filled(n);
+                    return Poll::Ready(Ok(()));
+                }
+                Err(e) => return Poll::Ready(Err(e)),
             }
-            Err(e) => Poll::Ready(Err(e)),
         }
     }
 
@@ -731,117 +732,15 @@ impl TcpStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        ready!(self.io.poll_write_ready(cx))?;
+        loop {
+            let ev = ready!(self.io.poll_write_ready(cx))?;
 
-        match self.io.get_ref().write(buf) {
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                self.io.clear_write_ready(cx)?;
-                Poll::Pending
+            match self.io.get_ref().write(buf) {
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    self.io.clear_readiness(ev);
+                }
+                x => return Poll::Ready(x),
             }
-            x => Poll::Ready(x),
-        }
-    }
-
-    pub(super) fn poll_write_buf_priv<B: Buf>(
-        &self,
-        cx: &mut Context<'_>,
-        buf: &mut B,
-    ) -> Poll<io::Result<usize>> {
-        use std::io::IoSlice;
-
-        ready!(self.io.poll_write_ready(cx))?;
-
-        // The `IoVec` (v0.1.x) type can't have a zero-length size, so create
-        // a dummy version from a 1-length slice which we'll overwrite with
-        // the `bytes_vectored` method.
-        static S: &[u8] = &[0];
-        const MAX_BUFS: usize = 64;
-
-        // IoSlice isn't Copy, so we must expand this manually ;_;
-        let mut slices: [IoSlice<'_>; MAX_BUFS] = [
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-            IoSlice::new(S),
-        ];
-        let cnt = buf.bytes_vectored(&mut slices);
-
-        let iovec = <&IoVec>::from(S);
-        let mut vecs = [iovec; MAX_BUFS];
-        for i in 0..cnt {
-            vecs[i] = (*slices[i]).into();
-        }
-
-        match self.io.get_ref().write_bufs(&vecs[..cnt]) {
-            Ok(n) => {
-                buf.advance(n);
-                Poll::Ready(Ok(n))
-            }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                self.io.clear_write_ready(cx)?;
-                Poll::Pending
-            }
-            Err(e) => Poll::Ready(Err(e)),
         }
     }
 }
@@ -850,11 +749,6 @@ impl TryFrom<TcpStream> for mio::net::TcpStream {
     type Error = io::Error;
 
     /// Consumes value, returning the mio I/O object.
-    ///
-    /// See [`PollEvented::into_inner`] for more details about
-    /// resource deregistration that happens during the call.
-    ///
-    /// [`PollEvented::into_inner`]: crate::io::PollEvented::into_inner
     fn try_from(value: TcpStream) -> Result<Self, Self::Error> {
         value.io.into_inner()
     }
@@ -891,14 +785,6 @@ impl AsyncWrite for TcpStream {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         self.poll_write_priv(cx, buf)
-    }
-
-    fn poll_write_buf<B: Buf>(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut B,
-    ) -> Poll<io::Result<usize>> {
-        self.poll_write_buf_priv(cx, buf)
     }
 
     #[inline]

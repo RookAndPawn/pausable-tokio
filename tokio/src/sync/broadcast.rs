@@ -273,7 +273,7 @@ struct Tail {
     closed: bool,
 
     /// Receivers waiting for a value
-    waiters: LinkedList<Waiter>,
+    waiters: LinkedList<Waiter, <Waiter as linked_list::Link>::Target>,
 }
 
 /// Slot in the buffer
@@ -529,7 +529,7 @@ impl<T> Sender<T> {
     pub fn subscribe(&self) -> Receiver<T> {
         let shared = self.shared.clone();
 
-        let mut tail = shared.tail.lock().unwrap();
+        let mut tail = shared.tail.lock();
 
         if tail.rx_cnt == MAX_RECEIVERS {
             panic!("max receivers");
@@ -584,12 +584,12 @@ impl<T> Sender<T> {
     /// }
     /// ```
     pub fn receiver_count(&self) -> usize {
-        let tail = self.shared.tail.lock().unwrap();
+        let tail = self.shared.tail.lock();
         tail.rx_cnt
     }
 
     fn send2(&self, value: Option<T>) -> Result<usize, SendError<Option<T>>> {
-        let mut tail = self.shared.tail.lock().unwrap();
+        let mut tail = self.shared.tail.lock();
 
         if tail.rx_cnt == 0 {
             return Err(SendError(value));
@@ -695,7 +695,7 @@ impl<T> Receiver<T> {
             // the slot lock.
             drop(slot);
 
-            let mut tail = self.shared.tail.lock().unwrap();
+            let mut tail = self.shared.tail.lock();
 
             // Acquire slot lock again
             slot = self.shared.buffer[idx].read().unwrap();
@@ -793,7 +793,7 @@ where
     /// This is useful for a flavor of "optimistic check" before deciding to
     /// await on a receiver.
     ///
-    /// Compared with [`recv`], this function has three failure cases instead of one
+    /// Compared with [`recv`], this function has three failure cases instead of two
     /// (one for closed, one for an empty buffer, one for a lagging receiver).
     ///
     /// `Err(TryRecvError::Closed)` is returned when all `Sender` halves have
@@ -979,7 +979,7 @@ where
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        let mut tail = self.shared.tail.lock().unwrap();
+        let mut tail = self.shared.tail.lock();
 
         if let Some(waiter) = &self.waiter {
             // safety: tail lock is held
@@ -1142,7 +1142,7 @@ where
     fn drop(&mut self) {
         // Acquire the tail lock. This is required for safety before accessing
         // the waiter node.
-        let mut tail = self.receiver.as_mut().shared.tail.lock().unwrap();
+        let mut tail = self.receiver.as_mut().shared.tail.lock();
 
         // safety: tail lock is held
         let queued = self.waiter.with(|ptr| unsafe { (*ptr).queued });

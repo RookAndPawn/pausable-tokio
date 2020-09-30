@@ -201,19 +201,22 @@ pub use self::read_buf::ReadBuf;
 
 // Re-export some types from `std::io` so that users don't have to deal
 // with conflicts when `use`ing `tokio::io` and `std::io`.
+#[doc(no_inline)]
 pub use std::io::{Error, ErrorKind, Result, SeekFrom};
 
 cfg_io_driver! {
     pub(crate) mod driver;
 
     mod poll_evented;
-    pub use poll_evented::PollEvented;
+    #[cfg(not(loom))]
+    pub(crate) use poll_evented::PollEvented;
 
     mod registration;
-    pub use registration::Registration;
 }
 
 cfg_io_std! {
+    mod stdio_common;
+
     mod stderr;
     pub use stderr::{stderr, Stderr};
 
@@ -236,10 +239,6 @@ cfg_io_util! {
         copy, duplex, empty, repeat, sink, AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt,
         BufReader, BufStream, BufWriter, DuplexStream, Copy, Empty, Lines, Repeat, Sink, Split, Take,
     };
-
-    cfg_stream! {
-        pub use util::{stream_reader, StreamReader};
-    }
 }
 
 cfg_not_io_util! {

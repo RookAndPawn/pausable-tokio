@@ -6,6 +6,7 @@ use crate::runtime::blocking::schedule::NoopSchedule;
 use crate::runtime::blocking::shutdown;
 use crate::runtime::blocking::task::BlockingTask;
 use crate::runtime::builder::ThreadNameFn;
+use crate::runtime::context;
 use crate::runtime::task::{self, JoinHandle};
 use crate::runtime::{Builder, Callback, Handle};
 
@@ -46,6 +47,9 @@ struct Inner {
 
     // Maximum number of threads
     thread_cap: usize,
+
+    // Customizable wait timeout
+    keep_alive: Duration,
 }
 
 struct Shared {
@@ -67,7 +71,7 @@ pub(crate) fn spawn_blocking<F, R>(func: F) -> JoinHandle<R>
 where
     F: FnOnce() -> R + Send + 'static,
 {
-    let rt = Handle::current();
+    let rt = context::current().expect("not currently running on the Tokio runtime.");
 
     let (task, handle) = task::joinable(BlockingTask::new(func));
     let _ = rt.blocking_spawner.spawn(task, &rt);
@@ -79,7 +83,7 @@ pub(crate) fn try_spawn_blocking<F, R>(func: F) -> Result<(), ()>
 where
     F: FnOnce() -> R + Send + 'static,
 {
-    let rt = Handle::current();
+    let rt = context::current().expect("not currently running on the Tokio runtime.");
 
     let (task, _handle) = task::joinable(BlockingTask::new(func));
     rt.blocking_spawner.spawn(task, &rt)
@@ -90,6 +94,10 @@ where
 impl BlockingPool {
     pub(crate) fn new(builder: &Builder, thread_cap: usize) -> BlockingPool {
         let (shutdown_tx, shutdown_rx) = shutdown::channel();
+        #[cfg(feature = "blocking")]
+        let keep_alive = builder.keep_alive.unwrap_or(KEEP_ALIVE);
+        #[cfg(not(feature = "blocking"))]
+        let keep_alive = KEEP_ALIVE;
 
         BlockingPool {
             spawner: Spawner {
@@ -109,6 +117,7 @@ impl BlockingPool {
                     after_start: builder.after_start.clone(),
                     before_stop: builder.before_stop.clone(),
                     thread_cap,
+                    keep_alive,
                 }),
             },
             shutdown_rx,
@@ -120,7 +129,7 @@ impl BlockingPool {
     }
 
     pub(crate) fn shutdown(&mut self, timeout: Option<Duration>) {
-        let mut shared = self.spawner.inner.shared.lock().unwrap();
+        let mut shared = self.spawner.inner.shared.lock();
 
         // The function can be called multiple times. First, by explicitly
         // calling `shutdown` then by the drop handler calling `shutdown`. This
@@ -161,7 +170,7 @@ impl fmt::Debug for BlockingPool {
 impl Spawner {
     pub(crate) fn spawn(&self, task: Task, rt: &Handle) -> Result<(), ()> {
         let shutdown_tx = {
-            let mut shared = self.inner.shared.lock().unwrap();
+            let mut shared = self.inner.shared.lock();
 
             if shared.shutdown {
                 // Shutdown the task
@@ -198,7 +207,7 @@ impl Spawner {
         };
 
         if let Some(shutdown_tx) = shutdown_tx {
-            let mut shared = self.inner.shared.lock().unwrap();
+            let mut shared = self.inner.shared.lock();
             let entry = shared.worker_threads.vacant_entry();
 
             let handle = self.spawn_thread(shutdown_tx, rt, entry.key());
@@ -242,7 +251,7 @@ impl Inner {
             f()
         }
 
-        let mut shared = self.shared.lock().unwrap();
+        let mut shared = self.shared.lock();
 
         'main: loop {
             // BUSY
@@ -250,14 +259,14 @@ impl Inner {
                 drop(shared);
                 task.run();
 
-                shared = self.shared.lock().unwrap();
+                shared = self.shared.lock();
             }
 
             // IDLE
             shared.num_idle += 1;
 
             while !shared.shutdown {
-                let lock_result = self.condvar.wait_timeout(shared, KEEP_ALIVE).unwrap();
+                let lock_result = self.condvar.wait_timeout(shared, self.keep_alive).unwrap();
 
                 shared = lock_result.0;
                 let timeout_result = lock_result.1;
@@ -287,7 +296,7 @@ impl Inner {
                     drop(shared);
                     task.shutdown();
 
-                    shared = self.shared.lock().unwrap();
+                    shared = self.shared.lock();
                 }
 
                 // Work was produced, and we "took" it (by decrementing num_notify).

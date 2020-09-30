@@ -39,7 +39,6 @@ cfg_io_util! {
     pub use mem::{duplex, DuplexStream};
 
     mod read;
-    mod read_buf;
     mod read_exact;
     mod read_int;
     mod read_line;
@@ -63,17 +62,11 @@ cfg_io_util! {
     mod split;
     pub use split::Split;
 
-    cfg_stream! {
-        mod stream_reader;
-        pub use stream_reader::{stream_reader, StreamReader};
-    }
-
     mod take;
     pub use take::Take;
 
     mod write;
     mod write_all;
-    mod write_buf;
     mod write_int;
 
 

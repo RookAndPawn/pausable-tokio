@@ -112,9 +112,48 @@ cfg_not_test_util! {
             }
         }
 
+        pub(crate) fn run_unresumable<T,F>(&self, action: F) -> T
+            where F : FnOnce() -> T
+        {
+            if self.pausable {
+                self.pausing_clock.run_unresumable(action)
+            }
+            else {
+                unreachable!("I think this is better than blocking forever");
+            }
+        }
+
+        pub(crate) fn run_if_resumed<T,F>(&self, action: F) -> Option<T>
+            where F : FnOnce() -> T
+        {
+            if self.pausable {
+                self.pausing_clock.run_if_resumed(action)
+            }
+            else {
+                Some(action())
+            }
+        }
+
+        pub(crate) fn run_if_paused<T,F>(&self, action: F) -> Option<T>
+            where F : FnOnce() -> T
+        {
+            if self.pausable {
+                self.pausing_clock.run_if_paused(action)
+            }
+            else {
+                None
+            }
+        }
+
         pub(crate) fn wait_for_resume(&self) {
             if self.pausable {
                 self.pausing_clock.wait_for_resume();
+            }
+        }
+
+        pub(crate) fn wait_for_pause(&self) {
+            if self.pausable {
+                self.pausing_clock.wait_for_pause();
             }
         }
     }
@@ -276,15 +315,37 @@ cfg_test_util! {
             unreachable!("Not implemented for tests");
         }
 
-        pub(crate) fn wait_for_resume(&self) {
-            unreachable!("Not implemented for tests")
-        }
-
         #[allow(dead_code)]
         pub(crate) fn run_unpausable<T,F>(&self, action: F) -> T
             where F : FnOnce() -> T
         {
             action()
+        }
+
+        pub(crate) fn run_unresumable<T,F>(&self, action: F) -> T
+            where F : FnOnce() -> T
+        {
+            unreachable!("Not implemented for tests");
+        }
+
+        pub(crate) fn run_if_resumed<T,F>(&self, action: F) -> Option<T>
+            where F : FnOnce() -> T
+        {
+            Some(action())
+        }
+
+        pub(crate) fn run_if_paused<T,F>(&self, action: F) -> Option<T>
+            where F : FnOnce() -> T
+        {
+            None
+        }
+
+        pub(crate) fn wait_for_resume(&self) {
+            unreachable!("Not implemented for tests");
+        }
+
+        pub(crate) fn wait_for_pause(&self) {
+            unreachable!("Not implemented for tests");
         }
     }
 }

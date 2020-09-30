@@ -118,11 +118,6 @@ mod timeout;
 #[doc(inline)]
 pub use timeout::{timeout, timeout_at, Elapsed, Timeout};
 
-cfg_stream! {
-    mod throttle;
-    pub use throttle::{throttle, Throttle};
-}
-
 mod wheel;
 
 #[cfg(test)]
@@ -130,6 +125,7 @@ mod wheel;
 mod tests;
 
 // Re-export for convenience
+#[doc(no_inline)]
 pub use std::time::Duration;
 
 // ===== Internal utils =====

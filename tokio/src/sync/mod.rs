@@ -20,7 +20,7 @@
 //! few flavors of channels provided by Tokio. Each channel flavor supports
 //! different message passing patterns. When a channel supports multiple
 //! producers, many separate tasks may **send** messages. When a channel
-//! supports muliple consumers, many different separate tasks may **receive**
+//! supports multiple consumers, many different separate tasks may **receive**
 //! messages.
 //!
 //! Tokio provides many different channel flavors as different message passing
@@ -106,7 +106,7 @@
 //!
 //! #[tokio::main]
 //! async fn main() {
-//!     let (mut tx, mut rx) = mpsc::channel(100);
+//!     let (tx, mut rx) = mpsc::channel(100);
 //!
 //!     tokio::spawn(async move {
 //!         for i in 0..10 {
@@ -150,7 +150,7 @@
 //!     for _ in 0..10 {
 //!         // Each task needs its own `tx` handle. This is done by cloning the
 //!         // original handle.
-//!         let mut tx = tx.clone();
+//!         let tx = tx.clone();
 //!
 //!         tokio::spawn(async move {
 //!             tx.send(&b"data to write"[..]).await.unwrap();
@@ -213,7 +213,7 @@
 //!
 //!     // Spawn tasks that will send the increment command.
 //!     for _ in 0..10 {
-//!         let mut cmd_tx = cmd_tx.clone();
+//!         let cmd_tx = cmd_tx.clone();
 //!
 //!         join_handles.push(tokio::spawn(async move {
 //!             let (resp_tx, resp_rx) = oneshot::channel();
@@ -330,7 +330,7 @@
 //!             // If the configuration changed, send the new config value
 //!             // on the watch channel.
 //!             if new_config != config {
-//!                 tx.broadcast(new_config.clone()).unwrap();
+//!                 tx.send(new_config.clone()).unwrap();
 //!                 config = new_config;
 //!             }
 //!         }
@@ -355,10 +355,8 @@
 //!             let op = my_async_operation();
 //!             tokio::pin!(op);
 //!
-//!             // Receive the **initial** configuration value. As this is the
-//!             // first time the config is received from the watch, it will
-//!             // always complete immediatedly.
-//!             let mut conf = rx.recv().await.unwrap();
+//!             // Get the initial config value
+//!             let mut conf = rx.borrow().clone();
 //!
 //!             let mut op_start = Instant::now();
 //!             let mut delay = time::delay_until(op_start + conf.timeout);
@@ -375,8 +373,8 @@
 //!                         // Restart the timeout
 //!                         delay = time::delay_until(op_start + conf.timeout);
 //!                     }
-//!                     new_conf = rx.recv() => {
-//!                         conf = new_conf.unwrap();
+//!                     _ = rx.changed() => {
+//!                         conf = rx.borrow().clone();
 //!
 //!                         // The configuration has been updated. Update the
 //!                         // `delay` using the new `timeout` value.
@@ -399,14 +397,14 @@
 //! }
 //! ```
 //!
-//! [`watch` channel]: crate::sync::watch
-//! [`broadcast` channel]: crate::sync::broadcast
+//! [`watch` channel]: mod@crate::sync::watch
+//! [`broadcast` channel]: mod@crate::sync::broadcast
 //!
 //! # State synchronization
 //!
 //! The remaining synchronization primitives focus on synchronizing state.
 //! These are asynchronous equivalents to versions provided by `std`. They
-//! operate in a similar way as their `std` counterparts parts but will wait
+//! operate in a similar way as their `std` counterparts but will wait
 //! asynchronously instead of blocking the thread.
 //!
 //! * [`Barrier`](Barrier) Ensures multiple tasks will wait for each other to
@@ -445,7 +443,6 @@ cfg_sync! {
     pub mod oneshot;
 
     pub(crate) mod batch_semaphore;
-    pub(crate) mod semaphore_ll;
     mod semaphore;
     pub use semaphore::{Semaphore, SemaphorePermit, OwnedSemaphorePermit};
 
@@ -459,6 +456,9 @@ cfg_sync! {
 }
 
 cfg_not_sync! {
+    mod notify;
+    pub(crate) use notify::Notify;
+
     cfg_atomic_waker_impl! {
         mod task;
         pub(crate) use task::AtomicWaker;
@@ -470,9 +470,9 @@ cfg_not_sync! {
             feature = "signal"))]
     pub(crate) mod oneshot;
 
-    cfg_signal! {
+    cfg_signal_internal! {
         pub(crate) mod mpsc;
-        pub(crate) mod semaphore_ll;
+        pub(crate) mod batch_semaphore;
     }
 }
 

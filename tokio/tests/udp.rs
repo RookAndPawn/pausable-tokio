@@ -1,6 +1,7 @@
 #![warn(rust_2018_idioms)]
 #![cfg(feature = "full")]
 
+use std::sync::Arc;
 use tokio::net::UdpSocket;
 
 const MSG: &[u8] = b"hello";
@@ -8,8 +9,8 @@ const MSG_LEN: usize = MSG.len();
 
 #[tokio::test]
 async fn send_recv() -> std::io::Result<()> {
-    let mut sender = UdpSocket::bind("127.0.0.1:0").await?;
-    let mut receiver = UdpSocket::bind("127.0.0.1:0").await?;
+    let sender = UdpSocket::bind("127.0.0.1:0").await?;
+    let receiver = UdpSocket::bind("127.0.0.1:0").await?;
 
     sender.connect(receiver.local_addr()?).await?;
     receiver.connect(sender.local_addr()?).await?;
@@ -25,8 +26,8 @@ async fn send_recv() -> std::io::Result<()> {
 
 #[tokio::test]
 async fn send_to_recv_from() -> std::io::Result<()> {
-    let mut sender = UdpSocket::bind("127.0.0.1:0").await?;
-    let mut receiver = UdpSocket::bind("127.0.0.1:0").await?;
+    let sender = UdpSocket::bind("127.0.0.1:0").await?;
+    let receiver = UdpSocket::bind("127.0.0.1:0").await?;
 
     let receiver_addr = receiver.local_addr()?;
     sender.send_to(MSG, &receiver_addr).await?;
@@ -42,9 +43,10 @@ async fn send_to_recv_from() -> std::io::Result<()> {
 #[tokio::test]
 async fn split() -> std::io::Result<()> {
     let socket = UdpSocket::bind("127.0.0.1:0").await?;
-    let (mut r, mut s) = socket.split();
+    let s = Arc::new(socket);
+    let r = s.clone();
 
-    let addr = s.as_ref().local_addr()?;
+    let addr = s.local_addr()?;
     tokio::spawn(async move {
         s.send_to(MSG, &addr).await.unwrap();
     });
@@ -55,20 +57,34 @@ async fn split() -> std::io::Result<()> {
 }
 
 #[tokio::test]
-async fn reunite() -> std::io::Result<()> {
+async fn split_chan() -> std::io::Result<()> {
+    // setup UdpSocket that will echo all sent items
     let socket = UdpSocket::bind("127.0.0.1:0").await?;
-    let (s, r) = socket.split();
-    assert!(s.reunite(r).is_ok());
-    Ok(())
-}
+    let addr = socket.local_addr().unwrap();
+    let s = Arc::new(socket);
+    let r = s.clone();
 
-#[tokio::test]
-async fn reunite_error() -> std::io::Result<()> {
-    let socket = UdpSocket::bind("127.0.0.1:0").await?;
-    let socket1 = UdpSocket::bind("127.0.0.1:0").await?;
-    let (s, _) = socket.split();
-    let (_, r1) = socket1.split();
-    assert!(s.reunite(r1).is_err());
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<(Vec<u8>, std::net::SocketAddr)>(1_000);
+    tokio::spawn(async move {
+        while let Some((bytes, addr)) = rx.recv().await {
+            s.send_to(&bytes, &addr).await.unwrap();
+        }
+    });
+
+    tokio::spawn(async move {
+        let mut buf = [0u8; 32];
+        loop {
+            let (len, addr) = r.recv_from(&mut buf).await.unwrap();
+            tx.send((buf[..len].to_vec(), addr)).await.unwrap();
+        }
+    });
+
+    // test that we can send a value and get back some response
+    let sender = UdpSocket::bind("127.0.0.1:0").await?;
+    sender.send_to(MSG, addr).await?;
+    let mut recv_buf = [0u8; 32];
+    let (len, _) = sender.recv_from(&mut recv_buf).await?;
+    assert_eq!(&recv_buf[..len], MSG);
     Ok(())
 }
 
@@ -86,7 +102,7 @@ async fn try_send_spawn() {
     const MSG2_LEN: usize = MSG2.len();
 
     let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let mut receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
 
     receiver
         .connect(sender.local_addr().unwrap())

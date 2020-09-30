@@ -152,7 +152,6 @@ async_assert_fn!(tokio::fs::DirEntry::file_type(_): Send & Sync);
 
 async_assert_fn!(tokio::fs::File::open(&str): Send & Sync);
 async_assert_fn!(tokio::fs::File::create(&str): Send & Sync);
-async_assert_fn!(tokio::fs::File::seek(_, std::io::SeekFrom): Send & Sync);
 async_assert_fn!(tokio::fs::File::sync_all(_): Send & Sync);
 async_assert_fn!(tokio::fs::File::sync_data(_): Send & Sync);
 async_assert_fn!(tokio::fs::File::set_len(_, u64): Send & Sync);
@@ -173,10 +172,6 @@ async_assert_fn!(tokio::net::UdpSocket::send(_, &[u8]): Send & Sync);
 async_assert_fn!(tokio::net::UdpSocket::recv(_, &mut [u8]): Send & Sync);
 async_assert_fn!(tokio::net::UdpSocket::send_to(_, &[u8], SocketAddr): Send & Sync);
 async_assert_fn!(tokio::net::UdpSocket::recv_from(_, &mut [u8]): Send & Sync);
-async_assert_fn!(tokio::net::udp::RecvHalf::recv(_, &mut [u8]): Send & Sync);
-async_assert_fn!(tokio::net::udp::RecvHalf::recv_from(_, &mut [u8]): Send & Sync);
-async_assert_fn!(tokio::net::udp::SendHalf::send(_, &[u8]): Send & Sync);
-async_assert_fn!(tokio::net::udp::SendHalf::send_to(_, &[u8], &SocketAddr): Send & Sync);
 
 #[cfg(unix)]
 mod unix_datagram {
@@ -206,7 +201,7 @@ async_assert_fn!(tokio::sync::Mutex<Rc<u8>>::lock(_): !Send & !Sync);
 async_assert_fn!(tokio::sync::Mutex<u8>::lock_owned(_): Send & Sync);
 async_assert_fn!(tokio::sync::Mutex<Cell<u8>>::lock_owned(_): Send & Sync);
 async_assert_fn!(tokio::sync::Mutex<Rc<u8>>::lock_owned(_): !Send & !Sync);
-async_assert_fn!(tokio::sync::Notify::notified(_): Send & !Sync);
+async_assert_fn!(tokio::sync::Notify::notified(_): Send & Sync);
 async_assert_fn!(tokio::sync::RwLock<u8>::read(_): Send & Sync);
 async_assert_fn!(tokio::sync::RwLock<u8>::write(_): Send & Sync);
 async_assert_fn!(tokio::sync::RwLock<Cell<u8>>::read(_): !Send & !Sync);
@@ -230,9 +225,7 @@ async_assert_fn!(tokio::sync::mpsc::UnboundedReceiver<u8>::recv(_): Send & Sync)
 async_assert_fn!(tokio::sync::mpsc::UnboundedReceiver<Cell<u8>>::recv(_): Send & Sync);
 async_assert_fn!(tokio::sync::mpsc::UnboundedReceiver<Rc<u8>>::recv(_): !Send & !Sync);
 
-async_assert_fn!(tokio::sync::watch::Receiver<u8>::recv(_): Send & Sync);
-async_assert_fn!(tokio::sync::watch::Receiver<Cell<u8>>::recv(_): !Send & !Sync);
-async_assert_fn!(tokio::sync::watch::Receiver<Rc<u8>>::recv(_): !Send & !Sync);
+async_assert_fn!(tokio::sync::watch::Receiver<u8>::changed(_): Send & Sync);
 async_assert_fn!(tokio::sync::watch::Sender<u8>::closed(_): Send & Sync);
 async_assert_fn!(tokio::sync::watch::Sender<Cell<u8>>::closed(_): !Send & !Sync);
 async_assert_fn!(tokio::sync::watch::Sender<Rc<u8>>::closed(_): !Send & !Sync);

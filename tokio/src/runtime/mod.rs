@@ -10,14 +10,14 @@
 //! * A **timer** for scheduling work to run after a set period of time.
 //!
 //! Tokio's [`Runtime`] bundles all of these services as a single type, allowing
-//! them to be started, shut down, and configured together. However, most
-//! applications won't need to use [`Runtime`] directly. Instead, they can
+//! them to be started, shut down, and configured together. However, often
+//! it is not required to configure a [`Runtime`] manually, and user may just
 //! use the [`tokio::main`] attribute macro, which creates a [`Runtime`] under
 //! the hood.
 //!
 //! # Usage
 //!
-//! Most applications will use the [`tokio::main`] attribute macro.
+//! When no fine tuning is required, the [`tokio::main`] attribute macro can be used.
 //!
 //! ```no_run
 //! use tokio::net::TcpListener;
@@ -69,7 +69,7 @@
 //!
 //! fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     // Create the runtime
-//!     let mut rt = Runtime::new()?;
+//!     let rt  = Runtime::new()?;
 //!
 //!     // Spawn the root task
 //!     rt.block_on(async {
@@ -211,13 +211,18 @@ use pausable_time_config::PausableTimeConfig;
 mod builder;
 pub use self::builder::Builder;
 
+pub(crate) mod driver;
+
 pub(crate) mod enter;
 use self::enter::enter;
 
 mod handle;
-pub use self::handle::{Handle, TryCurrentError};
+use handle::Handle;
 
-mod io;
+mod io {
+    /// Re-exported for convenience.
+    pub(crate) use std::io::Result;
+}
 
 cfg_rt_threaded! {
     mod park;
@@ -229,8 +234,6 @@ use self::shell::Shell;
 
 mod spawner;
 use self::spawner::Spawner;
-
-mod time;
 
 cfg_rt_threaded! {
     mod queue;
@@ -245,6 +248,7 @@ cfg_rt_core! {
 
 use std::future::Future;
 use std::time::Duration;
+use std::sync::atomic::Ordering;
 
 /// The Tokio runtime.
 ///
@@ -295,7 +299,7 @@ enum Kind {
 
     /// Execute all tasks on the current-thread.
     #[cfg(feature = "rt-core")]
-    Basic(BasicScheduler<time::Driver>),
+    Basic(BasicScheduler<driver::Driver>),
 
     /// Execute tasks across multiple threads.
     #[cfg(feature = "rt-threaded")]
@@ -411,10 +415,11 @@ impl Runtime {
     /// complete, and yielding its resolved result. Any tasks or timers which
     /// the future spawns internally will be executed on the runtime.
     ///
-    /// `&mut` is required as calling `block_on` **may** result in advancing the
-    /// state of the runtime. The details depend on how the runtime is
-    /// configured. [`runtime::Handle::block_on`][handle] provides a version
-    /// that takes `&self`.
+    /// When this runtime is configured with `core_threads = 0`, only the first call
+    /// to `block_on` will run the IO and timer drivers. Calls to other methods _before_ the first
+    /// `block_on` completes will just hook into the driver running on the thread
+    /// that first called `block_on`. This means that the driver may be passed
+    /// from thread to thread by the user between calls to `block_on`.
     ///
     /// This method may not be called from an asynchronous context.
     ///
@@ -429,7 +434,7 @@ impl Runtime {
     /// use tokio::runtime::Runtime;
     ///
     /// // Create the runtime
-    /// let mut rt = Runtime::new().unwrap();
+    /// let rt  = Runtime::new().unwrap();
     ///
     /// // Execute the future, blocking the current thread until completion
     /// rt.block_on(async {
@@ -438,10 +443,8 @@ impl Runtime {
     /// ```
     ///
     /// [handle]: fn@Handle::block_on
-    pub fn block_on<F: Future>(&mut self, future: F) -> F::Output {
-        let kind = &mut self.kind;
-
-        self.handle.enter(|| match kind {
+    pub fn block_on<F: Future>(&self, future: F) -> F::Output {
+        self.handle.enter(|| match &self.kind {
             Kind::Shell(exec) => exec.block_on(future),
             #[cfg(feature = "rt-core")]
             Kind::Basic(exec) => exec.block_on(future),
@@ -454,11 +457,8 @@ impl Runtime {
     /// have an executor available on creation such as [`Delay`] or [`TcpStream`].
     /// It will also allow you to call methods such as [`tokio::spawn`].
     ///
-    /// This function is also available as [`Handle::enter`].
-    ///
     /// [`Delay`]: struct@crate::time::Delay
     /// [`TcpStream`]: struct@crate::net::TcpStream
-    /// [`Handle::enter`]: fn@crate::runtime::Handle::enter
     /// [`tokio::spawn`]: fn@crate::spawn
     ///
     /// # Example
@@ -489,27 +489,6 @@ impl Runtime {
         self.handle.enter(f)
     }
 
-    /// Return a handle to the runtime's spawner.
-    ///
-    /// The returned handle can be used to spawn tasks that run on this runtime, and can
-    /// be cloned to allow moving the `Handle` to other threads.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use tokio::runtime::Runtime;
-    ///
-    /// let rt = Runtime::new()
-    ///     .unwrap();
-    ///
-    /// let handle = rt.handle();
-    ///
-    /// handle.spawn(async { println!("hello"); });
-    /// ```
-    pub fn handle(&self) -> &Handle {
-        &self.handle
-    }
-
     /// Shutdown the runtime, waiting for at most `duration` for all spawned
     /// task to shutdown.
     ///
@@ -534,7 +513,7 @@ impl Runtime {
     /// use std::time::Duration;
     ///
     /// fn main() {
-    ///    let mut runtime = Runtime::new().unwrap();
+    ///    let runtime = Runtime::new().unwrap();
     ///
     ///    runtime.block_on(async move {
     ///        task::spawn_blocking(move || {
@@ -568,7 +547,7 @@ impl Runtime {
     /// use tokio::runtime::Runtime;
     ///
     /// fn main() {
-    ///    let mut runtime = Runtime::new().unwrap();
+    ///    let runtime = Runtime::new().unwrap();
     ///
     ///    runtime.block_on(async move {
     ///        let inner_runtime = Runtime::new().unwrap();
@@ -579,5 +558,75 @@ impl Runtime {
     /// ```
     pub fn shutdown_background(self) {
         self.shutdown_timeout(Duration::from_nanos(0))
+    }
+
+    /// Get the elapsed millis according to the pausable clock. This
+    /// function will panic if the runtime is not pausable
+    pub fn elapsed_millis(&self) -> u64 {
+        self.handle.clock.elapsed_millis()
+    }
+
+    /// Pause the runtime
+    pub fn pause(&self) -> bool {
+        self.handle.clock.pause()
+    }
+
+    /// Is the runtime paused?
+    pub fn is_paused(&self) -> bool {
+        self.handle.clock.is_paused()
+    }
+
+    /// Is the runtime paused using the given atomic ordering?
+    pub fn is_paused_ordered(&self, ordering: Ordering) -> bool {
+        self.handle.clock.is_paused_ordered(ordering)
+    }
+
+    /// resume the runtime if it's paused
+    pub fn resume(&self) -> bool {
+        self.handle.clock.resume()
+    }
+
+    /// Block _synchronously_ until the runtime resumes (if it's paused)
+    pub fn wait_for_resume(&self) {
+        self.handle.clock.wait_for_resume()
+    }
+
+    /// Block _synchronously_ until the runtime pauses (if it's resumed)
+    pub fn wait_for_pause(&self) {
+        self.handle.clock.wait_for_pause()
+    }
+
+    /// Evaluate the given closure if the clock is paused, and prevent pausing
+    /// until the closure completes
+    pub fn run_if_paused<T,F>(&self, action: F) -> Option<T>
+        where F : FnOnce() -> T
+    {
+        self.handle.clock.run_if_paused(action)
+    }
+
+    /// Evaluate the given closure if the clock is resumed, and prevent resuming
+    /// until the closure completes
+    pub fn run_if_resumed<T,F>(&self, action: F) -> Option<T>
+        where F : FnOnce() -> T
+    {
+        self.handle.clock.run_if_resumed(action)
+    }
+
+    /// Evaluate the given closure if the clock is paused, and prevent pausing
+    /// until the closure completes. If the clock is paused, this method will
+    /// block _synchronously_ until the clock is resumed
+    pub fn run_unpausable<T,F>(&self, action: F) -> T
+        where F : FnOnce() -> T
+    {
+        self.handle.clock.run_unpausable(action)
+    }
+
+    /// Evaluate the given closure if the clock is resumed, and prevent resuming
+    /// until the closure completes. If the clock is resumed, this method will
+    /// block _synchronously_ until the clock is paused
+    pub fn run_unresumable<T,F>(&self, action: F) -> T
+        where F : FnOnce() -> T
+    {
+        self.handle.clock.run_unresumable(action)
     }
 }

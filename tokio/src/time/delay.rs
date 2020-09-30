@@ -1,6 +1,6 @@
 use crate::time::driver::Registration;
 use crate::time::{Duration, Instant};
-
+use crate::runtime::context::current;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{self, Poll};
@@ -53,7 +53,7 @@ pub fn delay_until(deadline: Instant) -> Delay {
 /// [`interval`]: crate::time::interval()
 #[cfg_attr(docsrs, doc(alias = "sleep"))]
 pub fn delay_for(duration: Duration) -> Delay {
-    delay_until(crate::runtime::Handle::current().now() + duration)
+    delay_until(current().expect("No Runtime").now() + duration)
 }
 
 /// Future returned by [`delay_until`](delay_until) and

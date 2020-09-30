@@ -1,9 +1,10 @@
 use crate::runtime::handle::Handle;
 use crate::runtime::shell::Shell;
-use crate::runtime::{blocking, io, time, Callback, PausableTimeConfig, Runtime, Spawner};
-
+use crate::runtime::{blocking, driver, io, Callback, PausableTimeConfig, Runtime, Spawner};
+use super::driver::{create_clock, create_pausable_clock};
 use std::fmt;
-use std::sync::Arc;
+#[cfg(feature = "blocking")]
+use std::time::Duration;
 
 /// Builds Tokio Runtime with custom configuration values.
 ///
@@ -68,9 +69,14 @@ pub struct Builder {
 
     /// To run before each worker thread stops
     pub(super) before_stop: Option<Callback>,
+
+    #[cfg(feature = "blocking")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "blocking")))]
+    /// Customizable keep alive timeout for BlockingPool
+    pub(super) keep_alive: Option<Duration>,
 }
 
-pub(crate) type ThreadNameFn = Arc<dyn Fn() -> String + Send + Sync + 'static>;
+pub(crate) type ThreadNameFn = std::sync::Arc<dyn Fn() -> String + Send + Sync + 'static>;
 
 #[derive(Debug, Clone, Copy)]
 enum Kind {
@@ -105,7 +111,7 @@ impl Builder {
             max_threads: 512,
 
             // Default thread name
-            thread_name: Arc::new(|| "tokio-runtime-worker".into()),
+            thread_name: std::sync::Arc::new(|| "tokio-runtime-worker".into()),
 
             // Do not set a stack size by default
             thread_stack_size: None,
@@ -113,6 +119,9 @@ impl Builder {
             // No worker thread callbacks
             after_start: None,
             before_stop: None,
+
+            #[cfg(feature = "blocking")]
+            keep_alive: None,
         }
     }
 
@@ -134,7 +143,13 @@ impl Builder {
     ///     .unwrap();
     /// ```
     pub fn enable_all(&mut self) -> &mut Self {
-        #[cfg(feature = "io-driver")]
+        #[cfg(any(
+            feature = "process",
+            all(unix, feature = "signal"),
+            feature = "tcp",
+            feature = "udp",
+            feature = "uds",
+        ))]
         self.enable_io();
         #[cfg(feature = "time")]
         self.enable_time();
@@ -217,7 +232,7 @@ impl Builder {
     /// ```
     pub fn thread_name(&mut self, val: impl Into<String>) -> &mut Self {
         let val = val.into();
-        self.thread_name = Arc::new(move || val.clone());
+        self.thread_name = std::sync::Arc::new(move || val.clone());
         self
     }
 
@@ -245,7 +260,7 @@ impl Builder {
     where
         F: Fn() -> String + Send + Sync + 'static,
     {
-        self.thread_name = Arc::new(f);
+        self.thread_name = std::sync::Arc::new(f);
         self
     }
 
@@ -298,7 +313,7 @@ impl Builder {
     where
         F: Fn() + Send + Sync + 'static,
     {
-        self.after_start = Some(Arc::new(f));
+        self.after_start = Some(std::sync::Arc::new(f));
         self
     }
 
@@ -325,7 +340,7 @@ impl Builder {
     where
         F: Fn() + Send + Sync + 'static,
     {
-        self.before_stop = Some(Arc::new(f));
+        self.before_stop = Some(std::sync::Arc::new(f));
         self
     }
 
@@ -338,7 +353,7 @@ impl Builder {
     /// ```
     /// use tokio::runtime::Builder;
     ///
-    /// let mut rt = Builder::new().build().unwrap();
+    /// let rt  = Builder::new().build().unwrap();
     ///
     /// rt.block_on(async {
     ///     println!("Hello from the Tokio runtime");
@@ -354,14 +369,17 @@ impl Builder {
         }
     }
 
+    fn get_cfg(&self) -> driver::Cfg {
+        driver::Cfg {
+            enable_io: self.enable_io,
+            enable_time: self.enable_time,
+        }
+    }
+
     fn build_shell_runtime(&mut self) -> io::Result<Runtime> {
         use crate::runtime::Kind;
 
-        let clock = time::create_clock();
-
-        // Create I/O driver
-        let (io_driver, io_handle) = io::create_driver(self.enable_io)?;
-        let (driver, time_handle) = time::create_driver(self.enable_time, io_driver, clock.clone());
+        let (driver, resources) = driver::Driver::new(self.get_cfg(), todo!())?;
 
         let spawner = Spawner::Shell;
 
@@ -372,13 +390,38 @@ impl Builder {
             kind: Kind::Shell(Shell::new(driver)),
             handle: Handle {
                 spawner,
-                io_handle,
-                time_handle,
-                clock,
+                io_handle: resources.io_handle,
+                time_handle: resources.time_handle,
+                signal_handle: resources.signal_handle,
+                clock: resources.clock,
                 blocking_spawner,
             },
             blocking_pool,
         })
+    }
+
+    #[cfg(feature = "blocking")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "blocking")))]
+    /// Sets a custom timeout for a thread in the blocking pool.
+    ///
+    /// By default, the timeout for a thread is set to 10 seconds. This can
+    /// be overriden using .thread_keep_alive().
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use tokio::runtime;
+    /// # use std::time::Duration;
+    ///
+    /// # pub fn main() {
+    /// let rt = runtime::Builder::new()
+    ///     .thread_keep_alive(Duration::from_millis(100))
+    ///     .build();
+    /// # }
+    /// ```
+    pub fn thread_keep_alive(&mut self, duration: Duration) -> &mut Self {
+        self.keep_alive = Some(duration);
+        self
     }
 }
 
@@ -462,12 +505,7 @@ cfg_rt_core! {
         fn build_basic_runtime(&mut self) -> io::Result<Runtime> {
             use crate::runtime::{BasicScheduler, Kind};
 
-            let clock = time::create_clock();
-
-            // Create I/O driver
-            let (io_driver, io_handle) = io::create_driver(self.enable_io)?;
-
-            let (driver, time_handle) = time::create_driver(self.enable_time, io_driver, clock.clone());
+            let (driver, resources) = driver::Driver::new(self.get_cfg(), todo!())?;
 
             // And now put a single-threaded scheduler on top of the timer. When
             // there are no futures ready to do something, it'll let the timer or
@@ -484,9 +522,10 @@ cfg_rt_core! {
                 kind: Kind::Basic(scheduler),
                 handle: Handle {
                     spawner,
-                    io_handle,
-                    time_handle,
-                    clock,
+                    io_handle: resources.io_handle,
+                    time_handle: resources.time_handle,
+                    signal_handle: resources.signal_handle,
+                    clock: resources.clock,
                     blocking_spawner,
                 },
                 blocking_pool,
@@ -518,14 +557,13 @@ cfg_rt_threaded! {
             assert!(core_threads <= self.max_threads, "Core threads number cannot be above max limit");
 
             let clock = if let Some(pausable_config) = &self.pausable_time_cfg {
-                time::create_pausable_clock(pausable_config.start_paused, pausable_config.elapsed_time)
+                create_pausable_clock(pausable_config.start_paused, pausable_config.elapsed_time)
             } else {
-                time::create_clock()
+                create_clock()
             };
+            let (driver, resources) = driver::Driver::new(self.get_cfg(), clock.clone())?;
 
-            let (io_driver, io_handle) = io::create_driver(self.enable_io)?;
-            let (driver, time_handle) = time::create_driver(self.enable_time, io_driver, clock.clone());
-            let (scheduler, launch) = ThreadPool::new(core_threads, Parker::new(driver), clock.clone());
+            let (scheduler, launch) = ThreadPool::new(core_threads, Parker::new(driver), clock);
             let spawner = Spawner::ThreadPool(scheduler.spawner().clone());
 
             // Create the blocking pool
@@ -535,9 +573,10 @@ cfg_rt_threaded! {
             // Create the runtime handle
             let handle = Handle {
                 spawner,
-                io_handle,
-                time_handle,
-                clock,
+                io_handle: resources.io_handle,
+                time_handle: resources.time_handle,
+                signal_handle: resources.signal_handle,
+                clock: resources.clock,
                 blocking_spawner,
             };
 

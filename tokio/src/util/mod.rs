@@ -3,7 +3,6 @@ cfg_io_driver! {
     pub(crate) mod slab;
 }
 
-#[cfg(any(feature = "sync", feature = "rt-core"))]
 pub(crate) mod linked_list;
 
 #[cfg(any(feature = "rt-threaded", feature = "macros", feature = "stream"))]
@@ -11,6 +10,10 @@ mod rand;
 
 mod wake;
 pub(crate) use wake::{waker_ref, Wake};
+
+cfg_rt_core! {
+    pub(crate) use wake::WakerRef;
+}
 
 cfg_rt_threaded! {
     pub(crate) use rand::FastRand;

@@ -12,7 +12,7 @@ use crate::runtime;
 use crate::runtime::park::{Parker, Unparker};
 use crate::runtime::thread_pool::{AtomicCell, Idle};
 use crate::runtime::{queue, task};
-use crate::util::linked_list::LinkedList;
+use crate::util::linked_list::{Link, LinkedList};
 use crate::util::FastRand;
 use crate::time::Clock;
 
@@ -56,7 +56,7 @@ struct Core {
     is_shutdown: bool,
 
     /// Tasks owned by the core
-    tasks: LinkedList<Task>,
+    tasks: LinkedList<Task, <Task as Link>::Target>,
 
     /// Parker
     ///
@@ -792,7 +792,7 @@ impl Shared {
     ///
     /// If all workers have reached this point, the final cleanup is performed.
     fn shutdown(&self, core: Box<Core>, worker: Arc<Worker>) {
-        let mut workers = self.shutdown_workers.lock().unwrap();
+        let mut workers = self.shutdown_workers.lock();
         workers.push((core, worker));
 
         if workers.len() != self.remotes.len() {

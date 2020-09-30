@@ -7,12 +7,14 @@ thread_local! {
     static CONTEXT: RefCell<Option<Handle>> = RefCell::new(None)
 }
 
-pub(crate) fn current() -> Option<Handle> {
-    CONTEXT.with(|ctx| ctx.borrow().clone())
+cfg_blocking_impl! {
+    pub(crate) fn current() -> Option<Handle> {
+        CONTEXT.with(|ctx| ctx.borrow().clone())
+    }
 }
 
 cfg_io_driver! {
-    pub(crate) fn io_handle() -> crate::runtime::io::Handle {
+    pub(crate) fn io_handle() -> crate::runtime::driver::IoHandle {
         CONTEXT.with(|ctx| match *ctx.borrow() {
             Some(ref ctx) => ctx.io_handle.clone(),
             None => Default::default(),
@@ -20,8 +22,18 @@ cfg_io_driver! {
     }
 }
 
+cfg_signal_internal! {
+    #[cfg(unix)]
+    pub(crate) fn signal_handle() -> crate::runtime::driver::SignalHandle {
+        CONTEXT.with(|ctx| match *ctx.borrow() {
+            Some(ref ctx) => ctx.signal_handle.clone(),
+            None => Default::default(),
+        })
+    }
+}
+
 cfg_time! {
-    pub(crate) fn time_handle() -> crate::runtime::time::Handle {
+    pub(crate) fn time_handle() -> crate::runtime::driver::TimeHandle {
         CONTEXT.with(|ctx| match *ctx.borrow() {
             Some(ref ctx) => ctx.time_handle.clone(),
             None => Default::default(),
@@ -29,7 +41,7 @@ cfg_time! {
     }
 
     cfg_test_util! {
-        pub(crate) fn clock() -> Option<crate::runtime::time::Clock> {
+        pub(crate) fn clock() -> Option<crate::runtime::driver::Clock> {
             CONTEXT.with(|ctx| match *ctx.borrow() {
                 Some(ref ctx) => Some(ctx.clock.clone()),
                 None => None,
