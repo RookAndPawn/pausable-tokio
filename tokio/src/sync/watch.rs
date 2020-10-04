@@ -51,11 +51,17 @@
 //! [`Sender::closed`]: crate::sync::watch::Sender::closed
 
 use crate::sync::Notify;
-
+use crate::stream::Stream;
 use std::ops;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{Relaxed, SeqCst};
 use std::sync::{Arc, RwLock, RwLockReadGuard};
+use std::pin::Pin;
+use std::task::Poll::{Pending, Ready};
+use std::task::{Context, Poll};
+use std::future::Future;
+use futures::FutureExt;
+
 
 /// Receives values from the associated [`Sender`](struct@Sender).
 ///
@@ -314,6 +320,28 @@ impl<T> Drop for Receiver<T> {
             // This is the last `Receiver` handle, tasks waiting on `Sender::closed()`
             self.shared.notify_tx.notify_waiters();
         }
+    }
+}
+
+
+#[cfg(feature = "stream")]
+impl<T> Stream for Receiver<T> where T : Clone {
+    type Item = T;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<T>> {
+
+        let reader = self.clone();
+
+        let changed = self.changed().map(move |result| {
+            match result {
+                Ok(_) => Some(reader.borrow().clone()),
+                Err(_) => None
+            }
+        });
+
+        pin!(changed);
+
+        changed.poll(cx)
     }
 }
 
