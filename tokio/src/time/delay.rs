@@ -1,12 +1,8 @@
-<<<<<<< HEAD
-use crate::time::driver::Registration;
-use crate::time::{Duration, Instant};
+
 use crate::runtime::context::current;
-=======
 use crate::time::driver::{Entry, Handle};
 use crate::time::{Duration, Error, Instant};
 
->>>>>>> upstream-master
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
