@@ -235,6 +235,8 @@ use self::shell::Shell;
 mod spawner;
 use self::spawner::Spawner;
 
+use crate::runtime::blocking::task::BlockingTask;
+
 cfg_rt_threaded! {
     mod queue;
 
@@ -628,5 +630,15 @@ impl Runtime {
         where F : FnOnce() -> T
     {
         self.handle.clock.run_unresumable(action)
+    }
+
+    /// Run the provided function on an executor dedicated to blocking operations.
+    pub fn spawn_blocking<F, R>(&self, func: F) -> JoinHandle<R>
+    where
+        F: FnOnce() -> R + Send + 'static,
+    {
+        let (task, handle) = task::joinable(BlockingTask::new(func));
+        self.handle.blocking_spawner.spawn(task, &self.handle).expect("Blocking spawn failed");
+        handle
     }
 }
