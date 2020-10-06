@@ -8,15 +8,15 @@ fn assert_sync<T: Sync>() {}
 
 #[test]
 fn registration_is_send_and_sync() {
-    use crate::time::driver::Registration;
+    use crate::time::delay::Delay;
 
-    assert_send::<Registration>();
-    assert_sync::<Registration>();
+    assert_send::<Delay>();
+    assert_sync::<Delay>();
 }
 
 #[test]
 #[should_panic]
 fn delay_is_eager() {
     let when = Instant::now() + Duration::from_millis(100);
-    let _ = time::delay_until(when);
+    let _ = time::sleep_until(when);
 }

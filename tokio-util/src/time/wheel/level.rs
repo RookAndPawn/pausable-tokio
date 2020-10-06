@@ -1,10 +1,9 @@
-use super::{Item, OwnedItem};
 use crate::time::wheel::Stack;
 
 use std::fmt;
 
 /// Wheel for a single level in the timer. This wheel contains 64 slots.
-pub(crate) struct Level {
+pub(crate) struct Level<T> {
     level: usize,
 
     /// Bit field tracking which slots currently contain entries.
@@ -17,7 +16,7 @@ pub(crate) struct Level {
     occupied: u64,
 
     /// Slots
-    slot: [Stack; LEVEL_MULT],
+    slot: [T; LEVEL_MULT],
 }
 
 /// Indicates when a slot must be processed next.
@@ -38,90 +37,87 @@ pub(crate) struct Expiration {
 /// Being a power of 2 is very important.
 const LEVEL_MULT: usize = 64;
 
-impl Level {
-    pub(crate) fn new(level: usize) -> Level {
-        // A value has to be Copy in order to use syntax like:
-        //     let stack = Stack::default();
-        //     ...
-        //     slots: [stack; 64],
-        //
-        // Alternatively, since Stack is Default one can
-        // use syntax like:
-        //     let slots: [Stack; 64] = Default::default();
-        //
-        // However, that is only supported for arrays of size
-        // 32 or fewer.  So in our case we have to explicitly
-        // invoke the constructor for each array element.
-        let ctor = Stack::default;
+impl<T: Stack> Level<T> {
+    pub(crate) fn new(level: usize) -> Level<T> {
+        // Rust's derived implementations for arrays require that the value
+        // contained by the array be `Copy`. So, here we have to manually
+        // initialize every single slot.
+        macro_rules! s {
+            () => {
+                T::default()
+            };
+        };
 
         Level {
             level,
             occupied: 0,
             slot: [
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
-                ctor(),
+                // It does not look like the necessary traits are
+                // derived for [T; 64].
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
+                s!(),
             ],
         }
     }
@@ -177,17 +173,17 @@ impl Level {
         Some(slot)
     }
 
-    pub(crate) fn add_entry(&mut self, when: u64, item: OwnedItem) {
+    pub(crate) fn add_entry(&mut self, when: u64, item: T::Owned, store: &mut T::Store) {
         let slot = slot_for(when, self.level);
 
-        self.slot[slot].push(item);
+        self.slot[slot].push(item, store);
         self.occupied |= occupied_bit(slot);
     }
 
-    pub(crate) fn remove_entry(&mut self, when: u64, item: &Item) {
+    pub(crate) fn remove_entry(&mut self, when: u64, item: &T::Borrowed, store: &mut T::Store) {
         let slot = slot_for(when, self.level);
 
-        self.slot[slot].remove(item);
+        self.slot[slot].remove(item, store);
 
         if self.slot[slot].is_empty() {
             // The bit is currently set
@@ -198,8 +194,8 @@ impl Level {
         }
     }
 
-    pub(crate) fn pop_entry_slot(&mut self, slot: usize) -> Option<OwnedItem> {
-        let ret = self.slot[slot].pop();
+    pub(crate) fn pop_entry_slot(&mut self, slot: usize, store: &mut T::Store) -> Option<T::Owned> {
+        let ret = self.slot[slot].pop(store);
 
         if ret.is_some() && self.slot[slot].is_empty() {
             // The bit is currently set
@@ -212,7 +208,7 @@ impl Level {
     }
 }
 
-impl fmt::Debug for Level {
+impl<T> fmt::Debug for Level<T> {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt.debug_struct("Level")
             .field("occupied", &self.occupied)

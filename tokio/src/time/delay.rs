@@ -1,8 +1,15 @@
+<<<<<<< HEAD
 use crate::time::driver::Registration;
 use crate::time::{Duration, Instant};
 use crate::runtime::context::current;
+=======
+use crate::time::driver::{Entry, Handle};
+use crate::time::{Duration, Error, Instant};
+
+>>>>>>> upstream-master
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{self, Poll};
 
 /// Waits until `deadline` is reached.
@@ -15,14 +22,13 @@ use std::task::{self, Poll};
 ///
 /// Canceling a delay is done by dropping the returned future. No additional
 /// cleanup work is required.
-pub fn delay_until(deadline: Instant) -> Delay {
-    let registration = Registration::new(deadline, Duration::from_millis(0));
-    Delay { registration }
+pub fn sleep_until(deadline: Instant) -> Delay {
+    Delay::new_timeout(deadline, Duration::from_millis(0))
 }
 
 /// Waits until `duration` has elapsed.
 ///
-/// Equivalent to `delay_until(Instant::now() + duration)`. An asynchronous
+/// Equivalent to `sleep_until(Instant::now() + duration)`. An asynchronous
 /// analog to `std::thread::sleep`.
 ///
 /// No work is performed while awaiting on the delay to complete. The delay
@@ -41,48 +47,49 @@ pub fn delay_until(deadline: Instant) -> Delay {
 /// Wait 100ms and print "100 ms have elapsed".
 ///
 /// ```
-/// use tokio::time::{delay_for, Duration};
+/// use tokio::time::{sleep, Duration};
 ///
 /// #[tokio::main]
 /// async fn main() {
-///     delay_for(Duration::from_millis(100)).await;
+///     sleep(Duration::from_millis(100)).await;
 ///     println!("100 ms have elapsed");
 /// }
 /// ```
 ///
 /// [`interval`]: crate::time::interval()
-#[cfg_attr(docsrs, doc(alias = "sleep"))]
-pub fn delay_for(duration: Duration) -> Delay {
-    delay_until(current().expect("No Runtime").now() + duration)
+pub fn sleep(duration: Duration) -> Delay {
+    sleep_until(current().expect("No Runtime").now() + duration)
 }
 
-/// Future returned by [`delay_until`](delay_until) and
-/// [`delay_for`](delay_for).
+/// Future returned by [`sleep`](sleep) and
+/// [`sleep_until`](sleep_until).
 #[derive(Debug)]
 #[must_use = "futures do nothing unless you `.await` or poll them"]
 pub struct Delay {
     /// The link between the `Delay` instance and the timer that drives it.
     ///
     /// This also stores the `deadline` value.
-    registration: Registration,
+    entry: Arc<Entry>,
 }
 
 impl Delay {
     pub(crate) fn new_timeout(deadline: Instant, duration: Duration) -> Delay {
-        let registration = Registration::new(deadline, duration);
-        Delay { registration }
+        let handle = Handle::current();
+        let entry = Entry::new(&handle, deadline, duration);
+
+        Delay { entry }
     }
 
     /// Returns the instant at which the future will complete.
     pub fn deadline(&self) -> Instant {
-        self.registration.deadline()
+        self.entry.time_ref().deadline
     }
 
     /// Returns `true` if the `Delay` has elapsed
     ///
     /// A `Delay` is elapsed when the requested duration has elapsed.
     pub fn is_elapsed(&self) -> bool {
-        self.registration.is_elapsed()
+        self.entry.is_elapsed()
     }
 
     /// Resets the `Delay` instance to a new deadline.
@@ -93,7 +100,21 @@ impl Delay {
     /// This function can be called both before and after the future has
     /// completed.
     pub fn reset(&mut self, deadline: Instant) {
-        self.registration.reset(deadline);
+        unsafe {
+            self.entry.time_mut().deadline = deadline;
+        }
+
+        Entry::reset(&mut self.entry);
+    }
+
+    fn poll_elapsed(&self, cx: &mut task::Context<'_>) -> Poll<Result<(), Error>> {
+        // Keep track of task budget
+        let coop = ready!(crate::coop::poll_proceed(cx));
+
+        self.entry.poll_elapsed(cx).map(move |r| {
+            coop.made_progress();
+            r
+        })
     }
 }
 
@@ -103,16 +124,22 @@ impl Future for Delay {
     fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
         // `poll_elapsed` can return an error in two cases:
         //
-        // - AtCapacity: this is a pathlogical case where far too many
+        // - AtCapacity: this is a pathological case where far too many
         //   delays have been scheduled.
         // - Shutdown: No timer has been setup, which is a mis-use error.
         //
         // Both cases are extremely rare, and pretty accurately fit into
         // "logic errors", so we just panic in this case. A user couldn't
         // really do much better if we passed the error onwards.
-        match ready!(self.registration.poll_elapsed(cx)) {
+        match ready!(self.poll_elapsed(cx)) {
             Ok(()) => Poll::Ready(()),
             Err(e) => panic!("timer error: {}", e),
         }
+    }
+}
+
+impl Drop for Delay {
+    fn drop(&mut self) {
+        Entry::cancel(&self.entry);
     }
 }

@@ -1,5 +1,3 @@
-use crate::time::driver::Entry;
-
 mod level;
 pub(crate) use self::level::Expiration;
 use self::level::Level;
@@ -7,11 +5,8 @@ use self::level::Level;
 mod stack;
 pub(crate) use self::stack::Stack;
 
-use std::sync::Arc;
+use std::borrow::Borrow;
 use std::usize;
-
-pub(super) type Item = Entry;
-pub(super) type OwnedItem = Arc<Item>;
 
 /// Timing wheel implementation.
 ///
@@ -25,7 +20,7 @@ pub(super) type OwnedItem = Arc<Item>;
 ///
 /// See `Timer` documentation for some implementation notes.
 #[derive(Debug)]
-pub(crate) struct Wheel {
+pub(crate) struct Wheel<T> {
     /// The number of milliseconds elapsed since the wheel started.
     elapsed: u64,
 
@@ -39,7 +34,7 @@ pub(crate) struct Wheel {
     /// * ~ 4 min slots / ~ 4 hr range
     /// * ~ 4 hr slots / ~ 12 day range
     /// * ~ 12 day slots / ~ 2 yr range
-    levels: Vec<Level>,
+    levels: Vec<Level<T>>,
 }
 
 /// Number of levels. Each level has 64 slots. By using 6 levels with 64 slots
@@ -56,9 +51,12 @@ pub(crate) enum InsertError {
     Invalid,
 }
 
-impl Wheel {
+impl<T> Wheel<T>
+where
+    T: Stack,
+{
     /// Create a new timing wheel
-    pub(crate) fn new() -> Wheel {
+    pub(crate) fn new() -> Wheel<T> {
         let levels = (0..NUM_LEVELS).map(Level::new).collect();
 
         Wheel { elapsed: 0, levels }
@@ -94,8 +92,9 @@ impl Wheel {
     pub(crate) fn insert(
         &mut self,
         when: u64,
-        item: OwnedItem,
-    ) -> Result<(), (OwnedItem, InsertError)> {
+        item: T::Owned,
+        store: &mut T::Store,
+    ) -> Result<(), (T::Owned, InsertError)> {
         if when <= self.elapsed {
             return Err((item, InsertError::Elapsed));
         } else if when - self.elapsed > MAX_DURATION {
@@ -105,7 +104,7 @@ impl Wheel {
         // Get the level at which the entry should be stored
         let level = self.level_for(when);
 
-        self.levels[level].add_entry(when, item);
+        self.levels[level].add_entry(when, item, store);
 
         debug_assert!({
             self.levels[level]
@@ -118,11 +117,11 @@ impl Wheel {
     }
 
     /// Remove `item` from thee timing wheel.
-    pub(crate) fn remove(&mut self, item: &Item) {
-        let when = item.when();
+    pub(crate) fn remove(&mut self, item: &T::Borrowed, store: &mut T::Store) {
+        let when = T::when(item, store);
         let level = self.level_for(when);
 
-        self.levels[level].remove_entry(when, item);
+        self.levels[level].remove_entry(when, item, store);
     }
 
     /// Instant at which to poll
@@ -131,9 +130,8 @@ impl Wheel {
     }
 
     /// Advances the timer up to the instant represented by `now`.
-    pub(crate) fn poll(&mut self, now: u64) -> Option<OwnedItem> {
+    pub(crate) fn poll(&mut self, now: u64, store: &mut T::Store) -> Option<T::Owned> {
         loop {
-            // under what circumstances is poll.expiration Some vs. None?
             let expiration = self.next_expiration().and_then(|expiration| {
                 if expiration.deadline > now {
                     None
@@ -144,7 +142,7 @@ impl Wheel {
 
             match expiration {
                 Some(ref expiration) => {
-                    if let Some(item) = self.poll_expiration(expiration) {
+                    if let Some(item) = self.poll_expiration(expiration, store) {
                         return Some(item);
                     }
 
@@ -197,18 +195,22 @@ impl Wheel {
     /// time and the expiration time.  for each in that population either
     /// return it for notification (in the case of the last level) or tier
     /// it down to the next level (in all other cases).
-    pub(crate) fn poll_expiration(&mut self, expiration: &Expiration) -> Option<OwnedItem> {
-        while let Some(item) = self.pop_entry(expiration) {
+    pub(crate) fn poll_expiration(
+        &mut self,
+        expiration: &Expiration,
+        store: &mut T::Store,
+    ) -> Option<T::Owned> {
+        while let Some(item) = self.pop_entry(expiration, store) {
             if expiration.level == 0 {
-                debug_assert_eq!(item.when(), expiration.deadline);
+                debug_assert_eq!(T::when(item.borrow(), store), expiration.deadline);
 
                 return Some(item);
             } else {
-                let when = item.when();
+                let when = T::when(item.borrow(), store);
 
                 let next_level = expiration.level - 1;
 
-                self.levels[next_level].add_entry(when, item);
+                self.levels[next_level].add_entry(when, item, store);
             }
         }
 
@@ -228,8 +230,8 @@ impl Wheel {
         }
     }
 
-    fn pop_entry(&mut self, expiration: &Expiration) -> Option<OwnedItem> {
-        self.levels[expiration.level].pop_entry_slot(expiration.slot)
+    fn pop_entry(&mut self, expiration: &Expiration, store: &mut T::Store) -> Option<T::Owned> {
+        self.levels[expiration.level].pop_entry_slot(expiration.slot, store)
     }
 
     fn level_for(&self, when: u64) -> usize {

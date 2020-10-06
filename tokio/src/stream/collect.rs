@@ -1,7 +1,7 @@
 use crate::stream::Stream;
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
 use core::future::Future;
+use core::marker::PhantomPinned;
 use core::mem;
 use core::pin::Pin;
 use core::task::{Context, Poll};
@@ -10,7 +10,7 @@ use pin_project_lite::pin_project;
 // Do not export this struct until `FromStream` can be unsealed.
 pin_project! {
     /// Future returned by the [`collect`](super::StreamExt::collect) method.
-    #[must_use = "streams do nothing unless polled"]
+    #[must_use = "futures do nothing unless you `.await` or poll them"]
     #[derive(Debug)]
     pub struct Collect<T, U>
     where
@@ -20,6 +20,9 @@ pin_project! {
         #[pin]
         stream: T,
         collection: U::InternalCollection,
+        // Make this future `!Unpin` for compatibility with async trait methods.
+        #[pin]
+        _pin: PhantomPinned,
     }
 }
 
@@ -44,7 +47,11 @@ where
         let (lower, upper) = stream.size_hint();
         let collection = U::initialize(sealed::Internal, lower, upper);
 
-        Collect { stream, collection }
+        Collect {
+            stream,
+            collection,
+            _pin: PhantomPinned,
+        }
     }
 }
 
@@ -194,44 +201,6 @@ where
                 unreachable!();
             }
         }
-    }
-}
-
-impl<T: Buf> FromStream<T> for Bytes {}
-
-impl<T: Buf> sealed::FromStreamPriv<T> for Bytes {
-    type InternalCollection = BytesMut;
-
-    fn initialize(_: sealed::Internal, _lower: usize, _upper: Option<usize>) -> BytesMut {
-        BytesMut::new()
-    }
-
-    fn extend(_: sealed::Internal, collection: &mut BytesMut, item: T) -> bool {
-        collection.put(item);
-        true
-    }
-
-    fn finalize(_: sealed::Internal, collection: &mut BytesMut) -> Bytes {
-        mem::replace(collection, BytesMut::new()).freeze()
-    }
-}
-
-impl<T: Buf> FromStream<T> for BytesMut {}
-
-impl<T: Buf> sealed::FromStreamPriv<T> for BytesMut {
-    type InternalCollection = BytesMut;
-
-    fn initialize(_: sealed::Internal, _lower: usize, _upper: Option<usize>) -> BytesMut {
-        BytesMut::new()
-    }
-
-    fn extend(_: sealed::Internal, collection: &mut BytesMut, item: T) -> bool {
-        collection.put(item);
-        true
-    }
-
-    fn finalize(_: sealed::Internal, collection: &mut BytesMut) -> BytesMut {
-        mem::replace(collection, BytesMut::new())
     }
 }
 
