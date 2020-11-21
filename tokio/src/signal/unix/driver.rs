@@ -1,9 +1,10 @@
+#![cfg_attr(not(feature = "rt"), allow(dead_code))]
+
 //! Signal driver
 
-use crate::io::driver::Driver as IoDriver;
+use crate::io::driver::{Driver as IoDriver, Interest};
 use crate::io::PollEvented;
 use crate::park::Park;
-use crate::runtime::context;
 use crate::signal::registry::globals;
 
 use mio::net::UnixStream;
@@ -75,7 +76,7 @@ impl Driver {
         let receiver = UnixStream::from_std(original.try_clone()?);
         let receiver = PollEvented::new_with_interest_and_handle(
             receiver,
-            mio::Interest::READABLE | mio::Interest::WRITABLE,
+            Interest::READABLE | Interest::WRITABLE,
             park.handle(),
         )?;
 
@@ -102,7 +103,7 @@ impl Driver {
         let waker = unsafe { Waker::from_raw(RawWaker::new(ptr::null(), &NOOP_WAKER_VTABLE)) };
         let mut cx = Context::from_waker(&waker);
 
-        let ev = match self.receiver.poll_read_ready(&mut cx) {
+        let ev = match self.receiver.registration().poll_read_ready(&mut cx) {
             Poll::Ready(Ok(ev)) => ev,
             Poll::Ready(Err(e)) => panic!("reactor gone: {}", e),
             Poll::Pending => return, // No wake has arrived, bail
@@ -112,7 +113,7 @@ impl Driver {
         // if another signal has come in.
         let mut buf = [0; 128];
         loop {
-            match self.receiver.get_ref().read(&mut buf) {
+            match (&*self.receiver).read(&mut buf) {
                 Ok(0) => panic!("EOF on self-pipe"),
                 Ok(_) => continue, // Keep reading
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
@@ -120,7 +121,7 @@ impl Driver {
             }
         }
 
-        self.receiver.clear_readiness(ev);
+        self.receiver.registration().clear_readiness(ev);
 
         // Broadcast any signals which were received
         globals().broadcast();
@@ -165,22 +166,42 @@ impl Park for Driver {
 // ===== impl Handle =====
 
 impl Handle {
-    /// Returns a handle to the current driver
-    ///
-    /// # Panics
-    ///
-    /// This function panics if there is no current signal driver set.
-    pub(super) fn current() -> Self {
-        context::signal_handle().expect(
-            "there is no signal driver running, must be called from the context of Tokio runtime",
-        )
-    }
-
     pub(super) fn check_inner(&self) -> io::Result<()> {
         if self.inner.strong_count() > 0 {
             Ok(())
         } else {
             Err(io::Error::new(io::ErrorKind::Other, "signal driver gone"))
+        }
+    }
+}
+
+cfg_rt! {
+    impl Handle {
+        /// Returns a handle to the current driver
+        ///
+        /// # Panics
+        ///
+        /// This function panics if there is no current signal driver set.
+        pub(super) fn current() -> Self {
+            crate::runtime::context::signal_handle().expect(
+                "there is no signal driver running, must be called from the context of Tokio runtime",
+            )
+        }
+    }
+}
+
+cfg_not_rt! {
+    impl Handle {
+        /// Returns a handle to the current driver
+        ///
+        /// # Panics
+        ///
+        /// This function panics if there is no current signal driver set.
+        pub(super) fn current() -> Self {
+            panic!(
+                "there is no signal driver running, must be called from the context of Tokio runtime or with\
+                `rt` enabled.",
+            )
         }
     }
 }

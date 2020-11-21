@@ -7,7 +7,7 @@
 use crate::time::wheel::{self, Wheel};
 
 use futures_core::ready;
-use tokio::time::{sleep_until, Delay, Duration, Error, Instant};
+use tokio::time::{error::Error, sleep_until, Duration, Instant, Sleep};
 
 use slab::Slab;
 use std::cmp;
@@ -67,7 +67,7 @@ use std::task::{self, Poll};
 /// Using `DelayQueue` to manage cache entries.
 ///
 /// ```rust,no_run
-/// use tokio::time::Error;
+/// use tokio::time::error::Error;
 /// use tokio_util::time::{DelayQueue, delay_queue};
 ///
 /// use futures::ready;
@@ -138,7 +138,7 @@ pub struct DelayQueue<T> {
     expired: Stack<T>,
 
     /// Delay expiring when the *first* item in the queue expires
-    delay: Option<Delay>,
+    delay: Option<Sleep>,
 
     /// Wheel polling state
     wheel_now: u64,
@@ -771,7 +771,6 @@ impl<T> Default for DelayQueue<T> {
     }
 }
 
-#[cfg(feature = "stream")]
 impl<T> futures_core::Stream for DelayQueue<T> {
     // DelayQueue seems much more specific, where a user may care that it
     // has reached capacity, so return those errors instead of panicking.

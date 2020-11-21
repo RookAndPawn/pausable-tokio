@@ -1,3 +1,5 @@
+#![cfg_attr(not(feature = "rt"), allow(dead_code))]
+
 //! Time driver
 
 mod atomic_stack;
@@ -11,7 +13,7 @@ pub(crate) use self::handle::Handle;
 
 use crate::loom::sync::atomic::{AtomicU64, AtomicUsize};
 use crate::park::{Park, Unpark};
-use crate::time::{wheel, Error};
+use crate::time::{error::Error, wheel};
 use crate::time::{Clock, Duration, Instant};
 
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release, SeqCst};
@@ -20,12 +22,12 @@ use std::sync::Arc;
 use std::usize;
 use std::{cmp, fmt};
 
-/// Time implementation that drives [`Delay`][delay], [`Interval`][interval], and [`Timeout`][timeout].
+/// Time implementation that drives [`Sleep`][sleep], [`Interval`][interval], and [`Timeout`][timeout].
 ///
 /// A `Driver` instance tracks the state necessary for managing time and
-/// notifying the [`Delay`][delay] instances once their deadlines are reached.
+/// notifying the [`Sleep`][sleep] instances once their deadlines are reached.
 ///
-/// It is expected that a single instance manages many individual [`Delay`][delay]
+/// It is expected that a single instance manages many individual [`Sleep`][sleep]
 /// instances. The `Driver` implementation is thread-safe and, as such, is able
 /// to handle callers from across threads.
 ///
@@ -36,9 +38,9 @@ use std::{cmp, fmt};
 /// The driver has a resolution of one millisecond. Any unit of time that falls
 /// between milliseconds are rounded up to the next millisecond.
 ///
-/// When an instance is dropped, any outstanding [`Delay`][delay] instance that has not
+/// When an instance is dropped, any outstanding [`Sleep`][sleep] instance that has not
 /// elapsed will be notified with an error. At this point, calling `poll` on the
-/// [`Delay`][delay] instance will result in panic.
+/// [`Sleep`][sleep] instance will result in panic.
 ///
 /// # Implementation
 ///
@@ -65,14 +67,14 @@ use std::{cmp, fmt};
 /// * Level 5: 64 x ~12 day slots.
 ///
 /// When the timer processes entries at level zero, it will notify all the
-/// `Delay` instances as their deadlines have been reached. For all higher
+/// `Sleep` instances as their deadlines have been reached. For all higher
 /// levels, all entries will be redistributed across the wheel at the next level
-/// down. Eventually, as time progresses, entries with [`Delay`][delay] instances will
+/// down. Eventually, as time progresses, entries with [`Sleep`][sleep] instances will
 /// either be canceled (dropped) or their associated entries will reach level
 /// zero and be notified.
 ///
 /// [paper]: http://www.cs.columbia.edu/~nahum/w6998/papers/ton97-timing-wheels.pdf
-/// [delay]: crate::time::Delay
+/// [sleep]: crate::time::Sleep
 /// [timeout]: crate::time::Timeout
 /// [interval]: crate::time::Interval
 #[derive(Debug)]
@@ -138,7 +140,7 @@ where
 
     /// Returns a handle to the timer.
     ///
-    /// The `Handle` is how `Delay` instances are created. The `Delay` instances
+    /// The `Handle` is how `Sleep` instances are created. The `Sleep` instances
     /// can either be created directly or the `Handle` instance can be passed to
     /// `with_default`, setting the timer as the default timer for the execution
     /// context.
@@ -204,7 +206,7 @@ where
 
     /// Fires the entry if it needs to, otherwise queue it to be processed later.
     fn add_entry(&mut self, entry: Arc<Entry>, when: u64) {
-        use crate::time::wheel::InsertError;
+        use crate::time::error::InsertError;
 
         entry.set_when_internal(Some(when));
 

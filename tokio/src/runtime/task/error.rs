@@ -3,7 +3,7 @@ use std::fmt;
 use std::io;
 use std::sync::Mutex;
 
-doc_rt_core! {
+cfg_rt! {
     /// Task failed to execute to completion.
     pub struct JoinError {
         repr: Repr,
@@ -30,10 +30,7 @@ impl JoinError {
 
     /// Returns true if the error was caused by the task being cancelled
     pub fn is_cancelled(&self) -> bool {
-        match &self.repr {
-            Repr::Cancelled => true,
-            _ => false,
-        }
+        matches!(&self.repr, Repr::Cancelled)
     }
 }
 

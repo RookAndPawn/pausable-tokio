@@ -9,9 +9,7 @@ use self::idle::Idle;
 mod worker;
 pub(crate) use worker::Launch;
 
-cfg_blocking! {
-    pub(crate) use worker::block_in_place;
-}
+pub(crate) use worker::block_in_place;
 
 use crate::loom::sync::Arc;
 use crate::runtime::task::{self, JoinHandle};
@@ -60,15 +58,6 @@ impl ThreadPool {
     /// threads.
     pub(crate) fn spawner(&self) -> &Spawner {
         &self.spawner
-    }
-
-    /// Spawns a task
-    pub(crate) fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
-    where
-        F: Future + Send + 'static,
-        F::Output: Send + 'static,
-    {
-        self.spawner.spawn(future)
     }
 
     /// Blocks the current thread waiting for the future to complete.

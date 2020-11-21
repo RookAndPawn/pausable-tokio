@@ -9,7 +9,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV
 ///
 /// Implementations of `ToSocketAddrs` for string types require a DNS lookup.
 /// These implementations are only provided when Tokio is used with the
-/// **`dns`** feature flag.
+/// **`net`** feature flag.
 ///
 /// # Calling
 ///
@@ -23,12 +23,13 @@ pub trait ToSocketAddrs: sealed::ToSocketAddrsPriv {}
 
 type ReadyFuture<T> = future::Ready<io::Result<T>>;
 
-#[cfg(any(feature = "dns", feature = "tcp", feature = "udp"))]
-pub(crate) fn to_socket_addrs<T>(arg: T) -> T::Future
-where
-    T: ToSocketAddrs,
-{
-    arg.to_socket_addrs(sealed::Internal)
+cfg_net! {
+    pub(crate) fn to_socket_addrs<T>(arg: T) -> T::Future
+    where
+        T: ToSocketAddrs,
+    {
+        arg.to_socket_addrs(sealed::Internal)
+    }
 }
 
 // ===== impl &impl ToSocketAddrs =====
@@ -143,7 +144,7 @@ impl sealed::ToSocketAddrsPriv for &[SocketAddr] {
     }
 }
 
-cfg_dns! {
+cfg_net! {
     // ===== impl str =====
 
     impl ToSocketAddrs for str {}
@@ -153,22 +154,22 @@ cfg_dns! {
         type Future = sealed::MaybeReady;
 
         fn to_socket_addrs(&self, _: sealed::Internal) -> Self::Future {
-            use crate::runtime::spawn_blocking;
+            use crate::blocking::spawn_blocking;
             use sealed::MaybeReady;
 
             // First check if the input parses as a socket address
             let res: Result<SocketAddr, _> = self.parse();
 
             if let Ok(addr) = res {
-                return MaybeReady::Ready(Some(addr));
+                return MaybeReady(sealed::State::Ready(Some(addr)));
             }
 
             // Run DNS lookup on the blocking pool
             let s = self.to_owned();
 
-            MaybeReady::Blocking(spawn_blocking(move || {
+            MaybeReady(sealed::State::Blocking(spawn_blocking(move || {
                 std::net::ToSocketAddrs::to_socket_addrs(&s)
-            }))
+            })))
         }
     }
 
@@ -181,7 +182,7 @@ cfg_dns! {
         type Future = sealed::MaybeReady;
 
         fn to_socket_addrs(&self, _: sealed::Internal) -> Self::Future {
-            use crate::runtime::spawn_blocking;
+            use crate::blocking::spawn_blocking;
             use sealed::MaybeReady;
 
             let (host, port) = *self;
@@ -191,21 +192,21 @@ cfg_dns! {
                 let addr = SocketAddrV4::new(addr, port);
                 let addr = SocketAddr::V4(addr);
 
-                return MaybeReady::Ready(Some(addr));
+                return MaybeReady(sealed::State::Ready(Some(addr)));
             }
 
             if let Ok(addr) = host.parse::<Ipv6Addr>() {
                 let addr = SocketAddrV6::new(addr, port, 0, 0);
                 let addr = SocketAddr::V6(addr);
 
-                return MaybeReady::Ready(Some(addr));
+                return MaybeReady(sealed::State::Ready(Some(addr)));
             }
 
             let host = host.to_owned();
 
-            MaybeReady::Blocking(spawn_blocking(move || {
+            MaybeReady(sealed::State::Blocking(spawn_blocking(move || {
                 std::net::ToSocketAddrs::to_socket_addrs(&(&host[..], port))
-            }))
+            })))
         }
     }
 
@@ -245,15 +246,6 @@ pub(crate) mod sealed {
     use std::io;
     use std::net::SocketAddr;
 
-    cfg_dns! {
-        use crate::task::JoinHandle;
-
-        use std::option;
-        use std::pin::Pin;
-        use std::task::{Context, Poll};
-        use std::vec;
-    }
-
     #[doc(hidden)]
     pub trait ToSocketAddrsPriv {
         type Iter: Iterator<Item = SocketAddr> + Send + 'static;
@@ -265,10 +257,20 @@ pub(crate) mod sealed {
     #[allow(missing_debug_implementations)]
     pub struct Internal;
 
-    cfg_dns! {
+    cfg_net! {
+        use crate::blocking::JoinHandle;
+
+        use std::option;
+        use std::pin::Pin;
+        use std::task::{Context, Poll};
+        use std::vec;
+
         #[doc(hidden)]
         #[derive(Debug)]
-        pub enum MaybeReady {
+        pub struct MaybeReady(pub(super) State);
+
+        #[derive(Debug)]
+        pub(super) enum State {
             Ready(Option<SocketAddr>),
             Blocking(JoinHandle<io::Result<vec::IntoIter<SocketAddr>>>),
         }
@@ -284,12 +286,12 @@ pub(crate) mod sealed {
             type Output = io::Result<OneOrMore>;
 
             fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-                match *self {
-                    MaybeReady::Ready(ref mut i) => {
+                match self.0 {
+                    State::Ready(ref mut i) => {
                         let iter = OneOrMore::One(i.take().into_iter());
                         Poll::Ready(Ok(iter))
                     }
-                    MaybeReady::Blocking(ref mut rx) => {
+                    State::Blocking(ref mut rx) => {
                         let res = ready!(Pin::new(rx).poll(cx))?.map(OneOrMore::More);
 
                         Poll::Ready(res)

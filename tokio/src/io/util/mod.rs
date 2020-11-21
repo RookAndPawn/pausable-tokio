@@ -25,7 +25,10 @@ cfg_io_util! {
     mod chain;
 
     mod copy;
-    pub use copy::{copy, Copy};
+    pub use copy::copy;
+
+    mod copy_buf;
+    pub use copy_buf::copy_buf;
 
     mod empty;
     pub use empty::{empty, Empty};
@@ -39,6 +42,7 @@ cfg_io_util! {
     pub use mem::{duplex, DuplexStream};
 
     mod read;
+    mod read_buf;
     mod read_exact;
     mod read_int;
     mod read_line;
@@ -67,6 +71,7 @@ cfg_io_util! {
 
     mod write;
     mod write_all;
+    mod write_buf;
     mod write_int;
 
 

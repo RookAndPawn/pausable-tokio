@@ -152,7 +152,7 @@ async fn select_streams() {
         }
     }
 
-    msgs.sort();
+    msgs.sort_unstable();
     assert_eq!(&msgs[..], &[1, 2, 3]);
 }
 
@@ -359,10 +359,10 @@ async fn join_with_select() {
 async fn use_future_in_if_condition() {
     use tokio::time::{self, Duration};
 
-    let mut delay = time::sleep(Duration::from_millis(50));
+    let mut sleep = time::sleep(Duration::from_millis(50));
 
     tokio::select! {
-        _ = &mut delay, if !delay.is_elapsed() => {
+        _ = &mut sleep, if !sleep.is_elapsed() => {
         }
         _ = async { 1 } => {
         }

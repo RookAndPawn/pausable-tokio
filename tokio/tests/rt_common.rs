@@ -6,12 +6,11 @@
 
 macro_rules! rt_test {
     ($($t:tt)*) => {
-        mod basic_scheduler {
+        mod current_thread_scheduler {
             $($t)*
 
             fn rt() -> Arc<Runtime> {
-                tokio::runtime::Builder::new()
-                    .basic_scheduler()
+                tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .unwrap()
@@ -23,9 +22,8 @@ macro_rules! rt_test {
             $($t)*
 
             fn rt() -> Arc<Runtime> {
-                tokio::runtime::Builder::new()
-                    .threaded_scheduler()
-                    .core_threads(4)
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(4)
                     .enable_all()
                     .build()
                     .unwrap()
@@ -37,9 +35,8 @@ macro_rules! rt_test {
             $($t)*
 
             fn rt() -> Arc<Runtime> {
-                tokio::runtime::Builder::new()
-                    .threaded_scheduler()
-                    .core_threads(1)
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(1)
                     .enable_all()
                     .build()
                     .unwrap()
@@ -206,7 +203,7 @@ rt_test! {
                 out.push(i);
             }
 
-            out.sort();
+            out.sort_unstable();
             out
         });
 
@@ -265,7 +262,7 @@ rt_test! {
                     out.push(i);
                 }
 
-                out.sort();
+                out.sort_unstable();
                 out
             }).await.unwrap()
         });
@@ -430,7 +427,7 @@ rt_test! {
     }
 
     #[test]
-    fn delay_at_root() {
+    fn sleep_at_root() {
         let rt = rt();
 
         let now = Instant::now();
@@ -444,7 +441,7 @@ rt_test! {
     }
 
     #[test]
-    fn delay_in_spawn() {
+    fn sleep_in_spawn() {
         let rt = rt();
 
         let now = Instant::now();
@@ -471,7 +468,7 @@ rt_test! {
         rt.block_on(async move {
             let (tx, rx) = oneshot::channel();
 
-            let mut listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
 
             tokio::spawn(async move {
@@ -515,7 +512,7 @@ rt_test! {
     }
 
     #[test]
-    fn delay_from_blocking() {
+    fn sleep_from_blocking() {
         let rt = rt();
 
         rt.block_on(async move {
@@ -539,7 +536,7 @@ rt_test! {
         let rt = rt();
 
         rt.block_on(async move {
-            let mut listener = assert_ok!(TcpListener::bind("127.0.0.1:0").await);
+            let listener = assert_ok!(TcpListener::bind("127.0.0.1:0").await);
             let addr = assert_ok!(listener.local_addr());
 
             let peer = tokio::task::spawn_blocking(move || {
@@ -554,23 +551,6 @@ rt_test! {
             let _ = assert_ok!(listener.accept().await);
 
             assert_ok!(peer.await);
-        });
-    }
-
-    #[test]
-    fn spawn_blocking_after_shutdown() {
-        let rt = rt();
-        let handle = rt.clone();
-
-        // Shutdown
-        drop(rt);
-
-        handle.enter(|| {
-            let res = task::spawn_blocking(|| unreachable!());
-
-            // Avoid using a tokio runtime
-            let out = futures::executor::block_on(res);
-            assert!(out.is_err());
         });
     }
 
@@ -634,7 +614,7 @@ rt_test! {
 
         // Do some I/O work
         rt.block_on(async {
-            let mut listener = assert_ok!(TcpListener::bind("127.0.0.1:0").await);
+            let listener = assert_ok!(TcpListener::bind("127.0.0.1:0").await);
             let addr = assert_ok!(listener.local_addr());
 
             let srv = tokio::spawn(async move {
@@ -679,9 +659,10 @@ rt_test! {
     #[test]
     fn enter_and_spawn() {
         let rt = rt();
-        let handle = rt.enter(|| {
+        let handle = {
+            let _enter = rt.enter();
             tokio::spawn(async {})
-        });
+        };
 
         assert_ok!(rt.block_on(handle));
     }
@@ -875,7 +856,7 @@ rt_test! {
     }
 
     async fn client_server(tx: mpsc::Sender<()>) {
-        let mut server = assert_ok!(TcpListener::bind("127.0.0.1:0").await);
+        let server = assert_ok!(TcpListener::bind("127.0.0.1:0").await);
 
         // Get the assigned address
         let addr = assert_ok!(server.local_addr());
@@ -906,7 +887,7 @@ rt_test! {
         local.block_on(&rt, async move {
             let (tx, rx) = oneshot::channel();
 
-            let mut listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
 
             task::spawn_local(async move {
@@ -933,7 +914,7 @@ rt_test! {
     }
 
     async fn client_server_local(tx: mpsc::Sender<()>) {
-        let mut server = assert_ok!(TcpListener::bind("127.0.0.1:0").await);
+        let server = assert_ok!(TcpListener::bind("127.0.0.1:0").await);
 
         // Get the assigned address
         let addr = assert_ok!(server.local_addr());

@@ -136,7 +136,7 @@ impl OwnedReadHalf {
     ///
     /// [`TcpStream::poll_peek`]: TcpStream::poll_peek
     pub fn poll_peek(&mut self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
-        self.inner.poll_peek2(cx, buf)
+        self.inner.poll_peek(cx, buf)
     }
 
     /// Receives data on the socket from the remote address to which it is
@@ -227,6 +227,18 @@ impl AsyncWrite for OwnedWriteHalf {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         self.inner.poll_write_priv(cx, buf)
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        self.inner.poll_write_vectored_priv(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
     }
 
     #[inline]

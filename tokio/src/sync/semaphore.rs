@@ -27,7 +27,7 @@ pub struct Semaphore {
 #[derive(Debug)]
 pub struct SemaphorePermit<'a> {
     sem: &'a Semaphore,
-    permits: u16,
+    permits: u32,
 }
 
 /// An owned permit from the semaphore.
@@ -39,7 +39,7 @@ pub struct SemaphorePermit<'a> {
 #[derive(Debug)]
 pub struct OwnedSemaphorePermit {
     sem: Arc<Semaphore>,
-    permits: u16,
+    permits: u32,
 }
 
 /// Error returned from the [`Semaphore::try_acquire`] function.
@@ -104,12 +104,32 @@ impl Semaphore {
         }
     }
 
+    /// Acquires `n` permits from the semaphore
+    pub async fn acquire_many(&self, n: u32) -> SemaphorePermit<'_> {
+        self.ll_sem.acquire(n).await.unwrap();
+        SemaphorePermit {
+            sem: &self,
+            permits: n,
+        }
+    }
+
     /// Tries to acquire a permit from the semaphore.
     pub fn try_acquire(&self) -> Result<SemaphorePermit<'_>, TryAcquireError> {
         match self.ll_sem.try_acquire(1) {
             Ok(_) => Ok(SemaphorePermit {
                 sem: self,
                 permits: 1,
+            }),
+            Err(_) => Err(TryAcquireError(())),
+        }
+    }
+
+    /// Tries to acquire `n` permits from the semaphore.
+    pub fn try_acquire_many(&self, n: u32) -> Result<SemaphorePermit<'_>, TryAcquireError> {
+        match self.ll_sem.try_acquire(n) {
+            Ok(_) => Ok(SemaphorePermit {
+                sem: self,
+                permits: n,
             }),
             Err(_) => Err(TryAcquireError(())),
         }
@@ -123,7 +143,7 @@ impl Semaphore {
     pub async fn acquire_owned(self: Arc<Self>) -> OwnedSemaphorePermit {
         self.ll_sem.acquire(1).await.unwrap();
         OwnedSemaphorePermit {
-            sem: self.clone(),
+            sem: self,
             permits: 1,
         }
     }
@@ -136,7 +156,7 @@ impl Semaphore {
     pub fn try_acquire_owned(self: Arc<Self>) -> Result<OwnedSemaphorePermit, TryAcquireError> {
         match self.ll_sem.try_acquire(1) {
             Ok(_) => Ok(OwnedSemaphorePermit {
-                sem: self.clone(),
+                sem: self,
                 permits: 1,
             }),
             Err(_) => Err(TryAcquireError(())),

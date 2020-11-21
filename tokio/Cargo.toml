@@ -8,12 +8,12 @@ name = "tokio"
 #   - README.md
 # - Update CHANGELOG.md.
 # - Create "v0.3.x" git tag.
-version = "0.3.0"
+version = "0.3.4"
 edition = "2018"
 authors = ["Tokio Contributors <team@tokio.rs>"]
 license = "MIT"
 readme = "README.md"
-documentation = "https://docs.rs/tokio/0.3.0/tokio/"
+documentation = "https://docs.rs/tokio/0.3.4/tokio/"
 repository = "https://github.com/tokio-rs/tokio"
 homepage = "https://tokio.rs"
 description = """
@@ -22,7 +22,6 @@ backed applications.
 """
 categories = ["asynchronous", "network-programming"]
 keywords = ["io", "async", "non-blocking", "futures"]
-publish = false
 
 [features]
 # Include nothing by default
@@ -30,32 +29,37 @@ default = []
 
 # enable everything
 full = [
-  "blocking",
-  "dns",
   "fs",
   "io-util",
   "io-std",
   "macros",
   "net",
+  "parking_lot",
   "process",
-  "rt-core",
-  "rt-util",
-  "rt-threaded",
+  "rt",
+  "rt-multi-thread",
   "signal",
   "stream",
   "sync",
   "time",
 ]
 
-blocking = ["rt-core"]
-dns = ["rt-core"]
-fs = ["rt-core", "io-util"]
-io-util = ["memchr"]
+fs = []
+io-util = ["memchr", "bytes"]
 # stdin, stdout, stderr
-io-std = ["rt-core"]
+io-std = []
 macros = ["tokio-macros"]
-net = ["dns", "tcp", "udp", "uds"]
+net = [
+  "lazy_static",
+  "libc",
+  "mio/os-poll",
+  "mio/os-util",
+  "mio/tcp",
+  "mio/udp",
+  "mio/uds",
+]
 process = [
+  "bytes",
   "lazy_static",
   "libc",
   "mio/os-poll",
@@ -65,50 +69,49 @@ process = [
   "winapi/threadpoollegacyapiset",
 ]
 # Includes basic task execution capabilities
-rt-core = ["slab"]
-rt-util = []
-rt-threaded = [
+rt = ["slab"]
+rt-multi-thread = [
   "num_cpus",
-  "rt-core",
+  "rt",
 ]
 signal = [
   "lazy_static",
   "libc",
   "mio/os-poll",
   "mio/uds",
+  "mio/os-util",
   "signal-hook-registry",
   "winapi/consoleapi",
 ]
-stream = ["futures-core", "futures"]
-sync = ["fnv"]
+stream = ["futures-core"]
+sync = []
 test-util = []
-tcp = ["lazy_static", "mio/tcp", "mio/os-poll"]
 time = ["pausable_clock"]
-udp = ["lazy_static", "mio/udp", "mio/os-poll"]
-uds = ["lazy_static", "libc", "mio/uds", "mio/os-poll"]
 
 [dependencies]
 tokio-macros = { version = "0.3.0", path = "../tokio-macros", optional = true }
 
-bytes = "0.5.0"
-pin-project-lite = "0.1.1"
+pin-project-lite = "0.2.0"
 
 # Everything else is optional...
-fnv = { version = "1.0.6", optional = true }
+bytes = { version = "0.6.0", optional = true }
 futures-core = { version = "0.3.0", optional = true }
-futures = { version = "0.3.0", optional = true, features = ["async-await"] }
-lazy_static = { version = "1.0.2", optional = true }
+lazy_static = { version = "1.4.0", optional = true }
 memchr = { version = "2.2", optional = true }
-mio = { version = "0.7.2", optional = true }
+mio = { version = "0.7.6", optional = true }
 num_cpus = { version = "1.8.0", optional = true }
-parking_lot = { version = "0.11.0", optional = true } # Not in full
+parking_lot = { version = "0.11.0", optional = true }
 slab = { version = "0.4.1", optional = true }
-tracing = { version = "0.1.16", default-features = false, features = ["std"], optional = true } # Not in full
+tracing = { version = "0.1.21", default-features = false, features = ["std"], optional = true } # Not in full
 pausable_clock = { version = "0.3.2", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { version = "0.2.42", optional = true }
 signal-hook-registry = { version = "1.1.1", optional = true }
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = { version = "0.2.42" }
+nix = { version = "0.19.0" }
 
 [target.'cfg(windows)'.dependencies.winapi]
 version = "0.3.8"
@@ -118,11 +121,14 @@ optional = true
 [dev-dependencies]
 tokio-test = { version = "0.3.0", path = "../tokio-test" }
 futures = { version = "0.3.0", features = ["async-await"] }
-proptest = "0.9.4"
+proptest = "0.10.0"
 tempfile = "3.1.0"
 
 [target.'cfg(loom)'.dev-dependencies]
 loom = { version = "0.3.5", features = ["futures", "checkpoint"] }
+
+[build-dependencies]
+autocfg = "1" # Needed for conditionally enabling `track-caller`
 
 [package.metadata.docs.rs]
 all-features = true

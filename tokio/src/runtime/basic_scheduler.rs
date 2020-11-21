@@ -2,7 +2,7 @@ use crate::future::poll_fn;
 use crate::loom::sync::Mutex;
 use crate::park::{Park, Unpark};
 use crate::runtime::task::{self, JoinHandle, Schedule, Task};
-use crate::sync::Notify;
+use crate::sync::notify::Notify;
 use crate::util::linked_list::{Link, LinkedList};
 use crate::util::{waker_ref, Wake, WakerRef};
 
@@ -123,15 +123,6 @@ impl<P: Park> BasicScheduler<P> {
 
     pub(crate) fn spawner(&self) -> &Spawner {
         &self.spawner
-    }
-
-    /// Spawns a future onto the thread pool
-    pub(crate) fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
-    where
-        F: Future + Send + 'static,
-        F::Output: Send + 'static,
-    {
-        self.spawner.spawn(future)
     }
 
     pub(crate) fn block_on<F: Future>(&self, future: F) -> F::Output {

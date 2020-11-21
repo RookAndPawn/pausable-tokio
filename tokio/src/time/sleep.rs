@@ -1,7 +1,7 @@
 
 use crate::runtime::context::current;
 use crate::time::driver::{Entry, Handle};
-use crate::time::{Duration, Error, Instant};
+use crate::time::{error::Error, Duration, Instant};
 
 use std::future::Future;
 use std::pin::Pin;
@@ -10,16 +10,16 @@ use std::task::{self, Poll};
 
 /// Waits until `deadline` is reached.
 ///
-/// No work is performed while awaiting on the delay to complete. The delay
+/// No work is performed while awaiting on the sleep future to complete. `Sleep`
 /// operates at millisecond granularity and should not be used for tasks that
 /// require high-resolution timers.
 ///
 /// # Cancellation
 ///
-/// Canceling a delay is done by dropping the returned future. No additional
+/// Canceling a sleep instance is done by dropping the returned future. No additional
 /// cleanup work is required.
-pub fn sleep_until(deadline: Instant) -> Delay {
-    Delay::new_timeout(deadline, Duration::from_millis(0))
+pub fn sleep_until(deadline: Instant) -> Sleep {
+    Sleep::new_timeout(deadline, Duration::from_millis(0))
 }
 
 /// Waits until `duration` has elapsed.
@@ -27,15 +27,17 @@ pub fn sleep_until(deadline: Instant) -> Delay {
 /// Equivalent to `sleep_until(Instant::now() + duration)`. An asynchronous
 /// analog to `std::thread::sleep`.
 ///
-/// No work is performed while awaiting on the delay to complete. The delay
+/// No work is performed while awaiting on the sleep future to complete. `Sleep`
 /// operates at millisecond granularity and should not be used for tasks that
 /// require high-resolution timers.
 ///
 /// To run something regularly on a schedule, see [`interval`].
 ///
+/// The maximum duration for a sleep is 68719476734 milliseconds (approximately 2.2 years).
+///
 /// # Cancellation
 ///
-/// Canceling a delay is done by dropping the returned future. No additional
+/// Canceling a sleep instance is done by dropping the returned future. No additional
 /// cleanup work is required.
 ///
 /// # Examples
@@ -53,7 +55,7 @@ pub fn sleep_until(deadline: Instant) -> Delay {
 /// ```
 ///
 /// [`interval`]: crate::time::interval()
-pub fn sleep(duration: Duration) -> Delay {
+pub fn sleep(duration: Duration) -> Sleep {
     sleep_until(current().expect("No Runtime").now() + duration)
 }
 
@@ -61,19 +63,19 @@ pub fn sleep(duration: Duration) -> Delay {
 /// [`sleep_until`](sleep_until).
 #[derive(Debug)]
 #[must_use = "futures do nothing unless you `.await` or poll them"]
-pub struct Delay {
-    /// The link between the `Delay` instance and the timer that drives it.
+pub struct Sleep {
+    /// The link between the `Sleep` instance and the timer that drives it.
     ///
     /// This also stores the `deadline` value.
     entry: Arc<Entry>,
 }
 
-impl Delay {
-    pub(crate) fn new_timeout(deadline: Instant, duration: Duration) -> Delay {
+impl Sleep {
+    pub(crate) fn new_timeout(deadline: Instant, duration: Duration) -> Sleep {
         let handle = Handle::current();
         let entry = Entry::new(&handle, deadline, duration);
 
-        Delay { entry }
+        Sleep { entry }
     }
 
     /// Returns the instant at which the future will complete.
@@ -81,16 +83,16 @@ impl Delay {
         self.entry.time_ref().deadline
     }
 
-    /// Returns `true` if the `Delay` has elapsed
+    /// Returns `true` if `Sleep` has elapsed.
     ///
-    /// A `Delay` is elapsed when the requested duration has elapsed.
+    /// A `Sleep` instance is elapsed when the requested duration has elapsed.
     pub fn is_elapsed(&self) -> bool {
         self.entry.is_elapsed()
     }
 
-    /// Resets the `Delay` instance to a new deadline.
+    /// Resets the `Sleep` instance to a new deadline.
     ///
-    /// Calling this function allows changing the instant at which the `Delay`
+    /// Calling this function allows changing the instant at which the `Sleep`
     /// future completes without having to create new associated state.
     ///
     /// This function can be called both before and after the future has
@@ -114,14 +116,14 @@ impl Delay {
     }
 }
 
-impl Future for Delay {
+impl Future for Sleep {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
         // `poll_elapsed` can return an error in two cases:
         //
         // - AtCapacity: this is a pathological case where far too many
-        //   delays have been scheduled.
+        //   sleep instances have been scheduled.
         // - Shutdown: No timer has been setup, which is a mis-use error.
         //
         // Both cases are extremely rare, and pretty accurately fit into
@@ -134,7 +136,7 @@ impl Future for Delay {
     }
 }
 
-impl Drop for Delay {
+impl Drop for Sleep {
     fn drop(&mut self) {
         Entry::cancel(&self.entry);
     }

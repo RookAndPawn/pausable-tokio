@@ -16,12 +16,10 @@ pub(crate) mod cell {
 }
 
 #[cfg(any(
+    feature = "net",
     feature = "process",
     feature = "signal",
     feature = "sync",
-    feature = "tcp",
-    feature = "udp",
-    feature = "uds",
 ))]
 pub(crate) mod future {
     pub(crate) use crate::sync::AtomicWaker;
@@ -76,17 +74,17 @@ pub(crate) mod sync {
         pub(crate) use crate::loom::std::atomic_u8::AtomicU8;
         pub(crate) use crate::loom::std::atomic_usize::AtomicUsize;
 
-        pub(crate) use std::sync::atomic::{spin_loop_hint, AtomicBool};
+        pub(crate) use std::sync::atomic::{fence, spin_loop_hint, AtomicBool, Ordering};
     }
 }
 
 pub(crate) mod sys {
-    #[cfg(feature = "rt-threaded")]
+    #[cfg(feature = "rt-multi-thread")]
     pub(crate) fn num_cpus() -> usize {
         usize::max(1, num_cpus::get())
     }
 
-    #[cfg(not(feature = "rt-threaded"))]
+    #[cfg(not(feature = "rt-multi-thread"))]
     pub(crate) fn num_cpus() -> usize {
         1
     }
