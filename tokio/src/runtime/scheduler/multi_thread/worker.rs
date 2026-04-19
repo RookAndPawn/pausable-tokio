@@ -663,6 +663,12 @@ impl Context {
         // Make the core available to the runtime context
         *self.core.borrow_mut() = Some(core);
 
+        // When the runtime was built with pausable time, wrap task
+        // execution with `run_unpausable` so that a task cannot be suspended
+        // mid-poll by a call to `Runtime::pause`.
+        #[cfg(feature = "time")]
+        let clock = &self.worker.handle.driver.clock;
+
         // Run the task
         coop::budget(|| {
             // Unlike the poll time above, poll start callback is attached to the task id,
@@ -673,6 +679,10 @@ impl Context {
                 .task_hooks
                 .poll_start_callback(&task_meta);
 
+            #[cfg(feature = "time")]
+            clock.run_unpausable(|| task.run());
+
+            #[cfg(not(feature = "time"))]
             task.run();
 
             #[cfg(tokio_unstable)]
@@ -750,6 +760,10 @@ impl Context {
                     .task_hooks
                     .poll_start_callback(&task_meta);
 
+                #[cfg(feature = "time")]
+                clock.run_unpausable(|| task.run());
+
+                #[cfg(not(feature = "time"))]
                 task.run();
 
                 #[cfg(tokio_unstable)]

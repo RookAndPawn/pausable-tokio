@@ -494,6 +494,145 @@ impl Runtime {
     }
 }
 
+cfg_time! {
+    impl Runtime {
+        /// Returns the current instant according to the runtime's clock.
+        ///
+        /// When the runtime was constructed with [`Builder::pausable_time`],
+        /// this value does not advance while the runtime is paused.
+        ///
+        /// [`Builder::pausable_time`]: crate::runtime::Builder::pausable_time
+        pub fn now(&self) -> crate::time::Instant {
+            self.handle.inner.driver().clock().now()
+        }
+
+        /// Returns the number of milliseconds that have elapsed on the
+        /// pausable clock.
+        ///
+        /// # Panics
+        ///
+        /// Panics if the runtime was not constructed with
+        /// [`Builder::pausable_time`].
+        ///
+        /// [`Builder::pausable_time`]: crate::runtime::Builder::pausable_time
+        pub fn elapsed_millis(&self) -> u64 {
+            self.handle.inner.driver().clock().elapsed_millis()
+        }
+
+        /// Pauses the runtime's clock.
+        ///
+        /// Returns `true` if the call actually paused the clock, `false` if
+        /// the clock was already paused.
+        ///
+        /// # Panics
+        ///
+        /// Panics if the runtime was not constructed with
+        /// [`Builder::pausable_time`] (when `test-util` is disabled).
+        ///
+        /// [`Builder::pausable_time`]: crate::runtime::Builder::pausable_time
+        pub fn pause(&self) -> bool {
+            #[cfg(feature = "test-util")]
+            {
+                self.handle.inner.driver().clock().try_pause()
+            }
+            #[cfg(not(feature = "test-util"))]
+            {
+                self.handle.inner.driver().clock().pause()
+            }
+        }
+
+        /// Resumes the runtime's clock, returning `true` if the call actually
+        /// unpaused the clock.
+        ///
+        /// # Panics
+        ///
+        /// Panics if the runtime was not constructed with
+        /// [`Builder::pausable_time`] (when `test-util` is disabled).
+        ///
+        /// [`Builder::pausable_time`]: crate::runtime::Builder::pausable_time
+        pub fn resume(&self) -> bool {
+            #[cfg(feature = "test-util")]
+            {
+                self.handle.inner.driver().clock().try_resume()
+            }
+            #[cfg(not(feature = "test-util"))]
+            {
+                self.handle.inner.driver().clock().resume()
+            }
+        }
+
+        /// Returns whether the runtime's clock is currently paused.
+        pub fn is_paused(&self) -> bool {
+            self.handle.inner.driver().clock().is_paused()
+        }
+
+        /// Returns whether the runtime's clock is currently paused, using the
+        /// given atomic ordering when loading the paused flag.
+        ///
+        /// This is a lower-level alternative to [`Runtime::is_paused`] for
+        /// callers that need a specific memory ordering. For the non-pausable
+        /// clock the result is always `false`.
+        pub fn is_paused_ordered(&self, ordering: std::sync::atomic::Ordering) -> bool {
+            self.handle
+                .inner
+                .driver()
+                .clock()
+                .is_paused_ordered(ordering)
+        }
+
+        /// Blocks the current thread until the runtime's clock is resumed.
+        /// Returns immediately if the clock is already resumed or not
+        /// pausable.
+        pub fn wait_for_resume(&self) {
+            self.handle.inner.driver().clock().wait_for_resume()
+        }
+
+        /// Blocks the current thread until the runtime's clock is paused.
+        /// Returns immediately if the clock is already paused or not pausable.
+        pub fn wait_for_pause(&self) {
+            self.handle.inner.driver().clock().wait_for_pause()
+        }
+
+        /// Runs `action` atomically if the clock is currently paused. Returns
+        /// `None` if the clock is resumed when this is called.
+        pub fn run_if_paused<T, F>(&self, action: F) -> Option<T>
+        where
+            F: FnOnce() -> T,
+        {
+            self.handle.inner.driver().clock().run_if_paused(action)
+        }
+
+        /// Runs `action` atomically if the clock is currently resumed. Returns
+        /// `None` if the clock is paused when this is called.
+        pub fn run_if_resumed<T, F>(&self, action: F) -> Option<T>
+        where
+            F: FnOnce() -> T,
+        {
+            self.handle.inner.driver().clock().run_if_resumed(action)
+        }
+
+        /// Runs `action` while preventing the clock from being paused. If the
+        /// clock is paused when this is called, the call blocks until the
+        /// clock is resumed.
+        pub fn run_unpausable<T, F>(&self, action: F) -> T
+        where
+            F: FnOnce() -> T,
+        {
+            self.handle.inner.driver().clock().run_unpausable(action)
+        }
+
+        /// Runs `action` while preventing the clock from being resumed. If the
+        /// clock is running when this is called, the call blocks until the
+        /// clock is paused.
+        pub fn run_unresumable<T, F>(&self, action: F) -> T
+        where
+            F: FnOnce() -> T,
+        {
+            self.handle.inner.driver().clock().run_unresumable(action)
+        }
+    }
+}
+
 impl Drop for Runtime {
     fn drop(&mut self) {
         match &mut self.scheduler {

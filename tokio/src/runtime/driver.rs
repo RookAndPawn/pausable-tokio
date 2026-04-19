@@ -39,6 +39,11 @@ pub(crate) struct Cfg {
     pub(crate) enable_time: bool,
     pub(crate) enable_pause_time: bool,
     pub(crate) start_paused: bool,
+    /// Optional configuration for pausable time. When `Some`, the runtime's
+    /// clock is created from `pausable_clock` and supports being paused from
+    /// outside of test-util.
+    #[cfg(feature = "time")]
+    pub(crate) pausable_time_cfg: Option<crate::runtime::PausableTimeConfig>,
     pub(crate) nevents: usize,
     pub(crate) timer_flavor: crate::runtime::TimerFlavor,
 }
@@ -47,6 +52,15 @@ impl Driver {
     pub(crate) fn new(cfg: Cfg) -> io::Result<(Self, Handle)> {
         let (io_stack, io_handle, signal_handle) = create_io_stack(cfg.enable_io, cfg.nevents)?;
 
+        #[cfg(feature = "time")]
+        let clock = match cfg.pausable_time_cfg {
+            Some(pausable_cfg) => {
+                create_pausable_clock(pausable_cfg.start_paused, pausable_cfg.elapsed_time)
+            }
+            None => create_clock(cfg.enable_pause_time, cfg.start_paused),
+        };
+
+        #[cfg(not(feature = "time"))]
         let clock = create_clock(cfg.enable_pause_time, cfg.start_paused);
 
         let (time_driver, time_handle) =
@@ -300,6 +314,11 @@ cfg_time! {
 
     fn create_clock(enable_pausing: bool, start_paused: bool) -> Clock {
         crate::time::Clock::new(enable_pausing, start_paused)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn create_pausable_clock(start_paused: bool, elapsed_time: Duration) -> Clock {
+        crate::time::Clock::new_pausable(start_paused, elapsed_time)
     }
 
     fn create_time_driver(

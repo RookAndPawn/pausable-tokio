@@ -7,22 +7,187 @@
 //! configurable.
 
 cfg_not_test_util! {
-    use crate::time::{Instant};
+    use crate::time::Instant;
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+    use pausable_clock::PausableClock;
 
+    /// A source of `Instant::now()` that can optionally be paused.
+    ///
+    /// When constructed via `Clock::new`, the clock is a no-op wrapper around
+    /// [`std::time::Instant::now`]. When constructed via
+    /// [`Clock::new_pausable`] (indirectly through the
+    /// [`Builder::pausable_time`](crate::runtime::Builder::pausable_time)
+    /// runtime builder method) the clock is backed by a
+    /// [`pausable_clock::PausableClock`] and the runtime's notion of time can
+    /// be paused and resumed by calling [`Runtime::pause`](crate::runtime::Runtime::pause)
+    /// and [`Runtime::resume`](crate::runtime::Runtime::resume).
     #[derive(Debug, Clone)]
-    pub(crate) struct Clock {}
+    pub(crate) struct Clock {
+        pausable: bool,
+        pausing_clock: Arc<PausableClock>,
+    }
 
     pub(crate) fn now() -> Instant {
         Instant::from_std(std::time::Instant::now())
     }
 
     impl Clock {
+        /// Returns `true` when the `test-util` feature is enabled. This is used
+        /// by the time driver to know whether it should call `advance` (which
+        /// is a test-only concept) or `wait_for_resume`.
+        #[allow(dead_code)]
+        pub(crate) fn is_test() -> bool {
+            false
+        }
+
         pub(crate) fn new(_enable_pausing: bool, _start_paused: bool) -> Clock {
-            Clock {}
+            Clock {
+                pausable: false,
+                pausing_clock: Arc::new(PausableClock::default()),
+            }
+        }
+
+        pub(crate) fn new_pausable(start_paused: bool, elapsed_time: Duration) -> Clock {
+            Clock {
+                pausable: true,
+                pausing_clock: Arc::new(PausableClock::new(elapsed_time, start_paused)),
+            }
+        }
+
+        /// Returns true when this clock can be paused/resumed.
+        pub(crate) fn pausable(&self) -> bool {
+            self.pausable
         }
 
         pub(crate) fn now(&self) -> Instant {
-            now()
+            if self.pausable {
+                // `PausableInstant` converts into `std::time::Instant` via
+                // `From`. The conversion preserves the pausable clock's view
+                // of time so that the runtime sees the paused instant.
+                Instant::from_std(std::time::Instant::from(self.pausing_clock.now()))
+            } else {
+                now()
+            }
+        }
+
+        /// Returns the number of milliseconds elapsed since the pausable clock
+        /// was created. Panics if the clock is not pausable.
+        pub(crate) fn elapsed_millis(&self) -> u64 {
+            if self.pausable {
+                self.pausing_clock.now().elapsed_millis()
+            } else {
+                panic!("elapsed_millis is only supported on pausable clocks")
+            }
+        }
+
+        pub(crate) fn is_paused(&self) -> bool {
+            if self.pausable {
+                self.pausing_clock.is_paused()
+            } else {
+                false
+            }
+        }
+
+        pub(crate) fn is_paused_ordered(&self, ordering: Ordering) -> bool {
+            if self.pausable {
+                self.pausing_clock.is_paused_ordered(ordering)
+            } else {
+                false
+            }
+        }
+
+        pub(crate) fn pause(&self) -> bool {
+            if self.pausable {
+                self.pausing_clock.pause()
+            } else {
+                panic!("this runtime was not configured to be pausable. \
+                    Use `Builder::pausable_time` to enable pausable time.");
+            }
+        }
+
+        pub(crate) fn resume(&self) -> bool {
+            if self.pausable {
+                self.pausing_clock.resume()
+            } else {
+                panic!("this runtime was not configured to be pausable. \
+                    Use `Builder::pausable_time` to enable pausable time.");
+            }
+        }
+
+        /// Runs `action` while preventing the clock from being paused. If the
+        /// clock is paused when this is called, the call blocks until the
+        /// clock is resumed.
+        pub(crate) fn run_unpausable<T, F>(&self, action: F) -> T
+        where
+            F: FnOnce() -> T,
+        {
+            if self.pausable {
+                self.pausing_clock.run_unpausable(action)
+            } else {
+                action()
+            }
+        }
+
+        /// Runs `action` while preventing the clock from being resumed. If the
+        /// clock is running when this is called, the call blocks until the
+        /// clock is paused.
+        pub(crate) fn run_unresumable<T, F>(&self, action: F) -> T
+        where
+            F: FnOnce() -> T,
+        {
+            if self.pausable {
+                self.pausing_clock.run_unresumable(action)
+            } else {
+                // Running an unresumable action on a non-pausable clock would
+                // otherwise block forever since the clock can never be paused.
+                unreachable!(
+                    "run_unresumable called on non-pausable clock; this would block forever"
+                );
+            }
+        }
+
+        /// Runs `action` atomically if the clock is currently resumed,
+        /// returning `None` if the clock is paused.
+        pub(crate) fn run_if_resumed<T, F>(&self, action: F) -> Option<T>
+        where
+            F: FnOnce() -> T,
+        {
+            if self.pausable {
+                self.pausing_clock.run_if_resumed(action)
+            } else {
+                Some(action())
+            }
+        }
+
+        /// Runs `action` atomically if the clock is currently paused,
+        /// returning `None` if the clock is resumed.
+        pub(crate) fn run_if_paused<T, F>(&self, action: F) -> Option<T>
+        where
+            F: FnOnce() -> T,
+        {
+            if self.pausable {
+                self.pausing_clock.run_if_paused(action)
+            } else {
+                None
+            }
+        }
+
+        /// Blocks the current thread until the clock is resumed. If the clock
+        /// is not currently paused, or not pausable, this returns immediately.
+        pub(crate) fn wait_for_resume(&self) {
+            if self.pausable {
+                self.pausing_clock.wait_for_resume();
+            }
+        }
+
+        /// Blocks the current thread until the clock is paused. If the clock is
+        /// not pausable, this does nothing.
+        pub(crate) fn wait_for_pause(&self) {
+            if self.pausable {
+                self.pausing_clock.wait_for_pause();
+            }
         }
     }
 }
@@ -377,6 +542,127 @@ cfg_test_util! {
             }
 
             Instant::from_std(ret)
+        }
+
+        // Extra methods that mirror the `cfg_not_test_util` variant so that
+        // `Runtime` can expose a uniform pausability API regardless of the
+        // `test-util` feature. These generally defer to the existing
+        // test-util primitives or are no-ops where no equivalent exists.
+
+        #[allow(dead_code)]
+        pub(crate) fn is_test() -> bool {
+            true
+        }
+
+        #[allow(dead_code)]
+        pub(crate) fn new_pausable(start_paused: bool, _elapsed_time: Duration) -> Clock {
+            // When `test-util` is enabled we always run the test clock with
+            // pausability enabled so that `Runtime::pause` / `Runtime::resume`
+            // are available in tests.
+            Self::new(true, start_paused)
+        }
+
+        #[allow(dead_code)]
+        pub(crate) fn pausable(&self) -> bool {
+            let inner = self.inner.lock();
+            inner.enable_pausing
+        }
+
+        #[allow(dead_code)]
+        pub(crate) fn elapsed_millis(&self) -> u64 {
+            let inner = self.inner.lock();
+            let mut ret = inner.base;
+            if let Some(unfrozen) = inner.unfrozen {
+                ret += unfrozen.elapsed();
+            }
+            ret.duration_since(inner.base - inner.base.elapsed())
+                .as_millis() as u64
+        }
+
+        pub(crate) fn is_paused_ordered(&self, _ordering: crate::loom::sync::atomic::Ordering) -> bool {
+            self.is_paused()
+        }
+
+        // The trait's public `pause()` returns `Result<(), &'static str>` to
+        // match historical behavior; the runtime-level `pause` simply returns
+        // whether the call succeeded.
+        #[allow(dead_code)]
+        pub(crate) fn try_pause(&self) -> bool {
+            match self.pause() {
+                Ok(()) => true,
+                Err(_) => false,
+            }
+        }
+
+        #[allow(dead_code)]
+        pub(crate) fn try_resume(&self) -> bool {
+            let mut inner = self.inner.lock();
+            if inner.unfrozen.is_some() {
+                return false;
+            }
+            inner.unfrozen = Some(std::time::Instant::now());
+            true
+        }
+
+        pub(crate) fn is_paused(&self) -> bool {
+            let inner = self.inner.lock();
+            inner.unfrozen.is_none()
+        }
+
+        /// No-op stub for compatibility with the pausable_clock-backed
+        /// implementation. In test mode, no separate `run_unpausable` mechanism
+        /// is needed because `time::pause` is controlled by the user directly.
+        pub(crate) fn run_unpausable<T, F>(&self, action: F) -> T
+        where
+            F: FnOnce() -> T,
+        {
+            action()
+        }
+
+        #[allow(dead_code)]
+        pub(crate) fn run_unresumable<T, F>(&self, _action: F) -> T
+        where
+            F: FnOnce() -> T,
+        {
+            unreachable!("run_unresumable is not supported when `test-util` is enabled")
+        }
+
+        #[allow(dead_code)]
+        pub(crate) fn run_if_resumed<T, F>(&self, action: F) -> Option<T>
+        where
+            F: FnOnce() -> T,
+        {
+            if self.is_paused() {
+                None
+            } else {
+                Some(action())
+            }
+        }
+
+        #[allow(dead_code)]
+        pub(crate) fn run_if_paused<T, F>(&self, action: F) -> Option<T>
+        where
+            F: FnOnce() -> T,
+        {
+            if self.is_paused() {
+                Some(action())
+            } else {
+                None
+            }
+        }
+
+        #[allow(dead_code)]
+        pub(crate) fn wait_for_resume(&self) {
+            // The test-util clock has no blocking notification for resume.
+            // The time driver uses `can_auto_advance` + `advance` instead of
+            // calling `wait_for_resume` when the `test-util` feature is
+            // enabled, so this should never be reached.
+            unreachable!("wait_for_resume is not supported when `test-util` is enabled")
+        }
+
+        #[allow(dead_code)]
+        pub(crate) fn wait_for_pause(&self) {
+            unreachable!("wait_for_pause is not supported when `test-util` is enabled")
         }
     }
 }

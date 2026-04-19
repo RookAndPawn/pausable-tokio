@@ -818,10 +818,20 @@ impl CoreGuard<'_> {
                     #[cfg(tokio_unstable)]
                     let task_meta = task.task_meta();
 
+                    // When the runtime was built with pausable time, wrap task
+                    // execution with `run_unpausable` so that a task cannot be
+                    // suspended mid-poll by a call to `Runtime::pause`.
+                    #[cfg(feature = "time")]
+                    let clock = &context.handle.driver.clock;
+
                     let (c, ()) = context.run_task(core, || {
                         #[cfg(tokio_unstable)]
                         context.handle.task_hooks.poll_start_callback(&task_meta);
 
+                        #[cfg(feature = "time")]
+                        clock.run_unpausable(|| task.run());
+
+                        #[cfg(not(feature = "time"))]
                         task.run();
 
                         #[cfg(tokio_unstable)]

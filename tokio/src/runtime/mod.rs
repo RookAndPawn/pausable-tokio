@@ -430,6 +430,9 @@ cfg_time! {
     #[cfg(all(tokio_unstable, feature = "rt-multi-thread"))]
     pub(crate) mod time_alt;
 
+    mod pausable_time_config;
+    pub(crate) use pausable_time_config::PausableTimeConfig;
+
     use std::task::{Context, Poll};
     use std::pin::Pin;
 

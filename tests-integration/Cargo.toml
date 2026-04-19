@@ -30,6 +30,10 @@ name = "macros_select"
 name = "rt_yield"
 required-features = ["rt", "macros", "sync"]
 
+[[test]]
+name = "rt_pausable_time"
+required-features = ["rt-time-pausable"]
+
 [features]
 # For mem check
 rt-net = ["tokio/rt", "tokio/rt-multi-thread", "tokio/net"]
@@ -54,6 +58,9 @@ macros = ["tokio/macros"]
 sync = ["tokio/sync"]
 rt = ["tokio/rt"]
 rt-multi-thread = ["rt", "tokio/rt-multi-thread"]
+# Exercises the pausable-time runtime builder. Intentionally does NOT enable
+# `tokio/test-util` so that the non-test pausable clock path is tested.
+rt-time-pausable = ["rt", "tokio/rt-multi-thread", "tokio/time"]
 
 [dependencies]
 tokio = { version = "1.0.0", path = "../tokio" }

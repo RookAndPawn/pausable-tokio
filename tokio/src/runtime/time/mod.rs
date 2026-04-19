@@ -281,6 +281,18 @@ impl Driver {
 
     cfg_not_test_util! {
         fn park_thread_timeout(&mut self, rt_handle: &driver::Handle, duration: Duration) {
+            let clock = rt_handle.clock();
+
+            // If the runtime was built with a pausable clock and the clock is
+            // currently paused, block until it is resumed rather than parking
+            // for the sleep's duration. Because the pausable clock does not
+            // advance while paused, the deadline stored in the wheel will be
+            // re-checked once the clock resumes.
+            if clock.pausable() && clock.is_paused() {
+                clock.wait_for_resume();
+                return;
+            }
+
             self.park.park_timeout(rt_handle, duration);
         }
     }

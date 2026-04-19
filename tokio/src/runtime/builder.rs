@@ -69,6 +69,12 @@ pub struct Builder {
     /// Whether or not the clock should start paused.
     start_paused: bool,
 
+    /// Pausable time configuration. When `Some`, the runtime uses a
+    /// pausable clock that can be paused/resumed at runtime even without the
+    /// `test-util` feature.
+    #[cfg(feature = "time")]
+    pausable_time_cfg: Option<crate::runtime::PausableTimeConfig>,
+
     /// The number of worker threads, used by Runtime.
     ///
     /// Only used when not using the current-thread executor.
@@ -292,6 +298,11 @@ impl Builder {
 
             // The clock starts not-paused
             start_paused: false,
+
+            // No pausable-time config by default; this is only set when the
+            // user calls `Builder::pausable_time`.
+            #[cfg(feature = "time")]
+            pausable_time_cfg: None,
 
             // Read from environment variable first in multi-threaded mode.
             // Default to lazy auto-detection (one thread per CPU core)
@@ -1109,6 +1120,8 @@ impl Builder {
             enable_io: self.enable_io,
             enable_time: self.enable_time,
             start_paused: self.start_paused,
+            #[cfg(feature = "time")]
+            pausable_time_cfg: self.pausable_time_cfg,
             nevents: self.nevents,
             timer_flavor: self.timer_flavor,
         }
@@ -1843,6 +1856,61 @@ cfg_test_util! {
         /// ```
         pub fn start_paused(&mut self, start_paused: bool) -> &mut Self {
             self.start_paused = start_paused;
+            self
+        }
+    }
+}
+
+cfg_time! {
+    impl Builder {
+        /// Configures the runtime to use a pausable clock.
+        ///
+        /// When enabled, the runtime's clock is backed by
+        /// [`pausable_clock::PausableClock`] and can be paused and resumed at
+        /// runtime using [`Runtime::pause`] / [`Runtime::resume`]. This differs
+        /// from [`Builder::start_paused`] (which requires the `test-util`
+        /// feature and the current-thread runtime) in that it works in
+        /// production code and with any scheduler.
+        ///
+        /// # Arguments
+        ///
+        /// * `start_paused` - if `true`, the clock is paused immediately after
+        ///   construction so that the runtime is paused when `block_on` starts.
+        /// * `elapsed_time` - an initial offset to seed the pausable clock
+        ///   with. This is useful if the runtime is resuming from a previously
+        ///   persisted state and callers want [`Runtime::elapsed_millis`] to
+        ///   continue from a specific value.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// # #[cfg(not(target_family = "wasm"))]
+        /// # {
+        /// use std::time::Duration;
+        /// use tokio::runtime;
+        ///
+        /// let rt = runtime::Builder::new_current_thread()
+        ///     .enable_time()
+        ///     .pausable_time(true, Duration::from_secs(0))
+        ///     .build()
+        ///     .unwrap();
+        ///
+        /// assert!(rt.is_paused());
+        /// # }
+        /// ```
+        ///
+        /// [`Runtime::pause`]: crate::runtime::Runtime::pause
+        /// [`Runtime::resume`]: crate::runtime::Runtime::resume
+        /// [`Runtime::elapsed_millis`]: crate::runtime::Runtime::elapsed_millis
+        pub fn pausable_time(
+            &mut self,
+            start_paused: bool,
+            elapsed_time: Duration,
+        ) -> &mut Self {
+            self.pausable_time_cfg = Some(crate::runtime::PausableTimeConfig {
+                start_paused,
+                elapsed_time,
+            });
             self
         }
     }
