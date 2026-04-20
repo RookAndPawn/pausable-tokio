@@ -60,7 +60,12 @@ rt = ["tokio/rt"]
 rt-multi-thread = ["rt", "tokio/rt-multi-thread"]
 # Exercises the pausable-time runtime builder. Intentionally does NOT enable
 # `tokio/test-util` so that the non-test pausable clock path is tested.
-rt-time-pausable = ["rt", "tokio/rt-multi-thread", "tokio/time"]
+rt-time-pausable = [
+    "rt",
+    "tokio/rt-multi-thread",
+    "tokio/time",
+    "tokio/sync",
+]
 
 [dependencies]
 tokio = { version = "1.0.0", path = "../tokio" }

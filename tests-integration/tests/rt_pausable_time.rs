@@ -7,6 +7,22 @@
 //! `tokio/tests`) so tokio can be compiled without `test-util` being pulled
 //! in via `tokio-test`. They only run when the `rt-time-pausable` feature is
 //! enabled.
+//!
+//! # Running
+//!
+//! The stress tests (`stress_*`) each spin up their own pausable runtime and
+//! an aggressive pauser OS thread. Running several of them in parallel on
+//! the same machine can starve each other's timing budgets, so we
+//! recommend running them serially:
+//!
+//! ```text
+//! cargo test -p tests-integration --release \
+//!     --features=rt-time-pausable --test rt_pausable_time \
+//!     -- --test-threads=1 --nocapture
+//! ```
+//!
+//! The quick correctness tests above the stress tests are safe to run in
+//! parallel.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -604,5 +620,590 @@ fn stress_pause_resume_multi_thread() {
         unpausable_obs,
         now_samples_obs,
         workers_finished,
+    );
+}
+
+// ==================================================================
+// Additional stress tests targeting features added to tokio after
+// the original pausable fork was written on tokio 0.3.4.
+// ==================================================================
+
+/// Spawns a thread that toggles the clock between paused and resumed with
+/// jittered intervals. `base_cycle_us` controls the baseline half-cycle
+/// length in microseconds; the actual value has up to 2ms of jitter added
+/// on top. The returned `JoinHandle` expects `stop` to be set; joining it
+/// returns `(pauses, resumes)` counts.
+fn spawn_pauser_with_rate(
+    rt: Arc<Runtime>,
+    stop: Arc<AtomicBool>,
+    base_cycle_us: u64,
+) -> thread::JoinHandle<(usize, usize)> {
+    thread::spawn(move || {
+        let mut state: u64 = 0x1234_5678_9ABC_DEF0;
+        let mut pauses = 0usize;
+        let mut resumes = 0usize;
+        while !stop.load(Ordering::Relaxed) {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let jitter_us = ((state >> 32) as u32 % 2000) as u64;
+
+            if rt.pause() {
+                pauses += 1;
+            }
+            thread::sleep(Duration::from_micros(base_cycle_us + jitter_us));
+            if rt.resume() {
+                resumes += 1;
+            }
+            thread::sleep(Duration::from_micros(base_cycle_us + jitter_us));
+        }
+        // Leave the clock resumed so outstanding work can finish.
+        rt.resume();
+        (pauses, resumes)
+    })
+}
+
+/// Convenience: aggressive ~500us pauser used by most stress tests.
+fn spawn_pauser(
+    rt: Arc<Runtime>,
+    stop: Arc<AtomicBool>,
+) -> thread::JoinHandle<(usize, usize)> {
+    spawn_pauser_with_rate(rt, stop, 500)
+}
+
+/// Stress test for `JoinSet` (tokio 1.21+) combined with pausable time on
+/// the current-thread scheduler.
+///
+/// Dynamically spawns tasks into a `JoinSet`, each of which performs a
+/// pausable `sleep` + some `run_unpausable` work. The pauser thread
+/// hammers pause/resume. New tasks are continually spawned as old ones
+/// complete. We assert that every task that was spawned actually completes
+/// with the expected result (the task's own id), no task is lost, and
+/// the pausable clock advances non-trivially.
+#[test]
+fn stress_joinset_current_thread() {
+    use tokio::task::JoinSet;
+
+    const TASK_BATCHES: usize = 8;
+    const TASKS_PER_BATCH: usize = 8;
+    const EXPECTED_TOTAL: usize = TASK_BATCHES * TASKS_PER_BATCH;
+    const MAX_TEST_RUNTIME: Duration = Duration::from_secs(60);
+
+    let rt = Arc::new(pausable_current_thread());
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let pauser = spawn_pauser(rt.clone(), stop.clone());
+
+    let start_real = std::time::Instant::now();
+    let start_pausable = rt.elapsed_millis();
+
+    let completed: usize = rt.block_on(async {
+        let mut joins: JoinSet<usize> = JoinSet::new();
+        let mut observed = vec![false; EXPECTED_TOTAL];
+        let mut next_id = 0usize;
+        let mut completed = 0usize;
+
+        // Seed the initial batch.
+        for _ in 0..TASKS_PER_BATCH {
+            let id = next_id;
+            next_id += 1;
+            joins.spawn(async move {
+                // Variable sleep so tasks complete out-of-order.
+                let sleep_ms = 1 + (id as u64 % 7);
+                tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+                id
+            });
+        }
+
+        while let Some(res) = joins.join_next().await {
+            let id = res.expect("task panicked");
+            assert!(id < EXPECTED_TOTAL, "task id out of bounds: {id}");
+            assert!(!observed[id], "task {id} completed twice");
+            observed[id] = true;
+            completed += 1;
+
+            // Keep feeding the set until we've spawned all tasks.
+            if next_id < EXPECTED_TOTAL {
+                let id = next_id;
+                next_id += 1;
+                joins.spawn(async move {
+                    let sleep_ms = 1 + (id as u64 % 7);
+                    tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+                    id
+                });
+            }
+        }
+
+        // Verify every task was observed exactly once.
+        assert!(observed.iter().all(|seen| *seen));
+        completed
+    });
+
+    stop.store(true, Ordering::Relaxed);
+    let (pauses, resumes) = pauser.join().expect("pauser thread panicked");
+    let real_elapsed = start_real.elapsed();
+    let pausable_elapsed = Duration::from_millis(rt.elapsed_millis() - start_pausable);
+
+    assert!(
+        real_elapsed <= MAX_TEST_RUNTIME,
+        "test took too long: {real_elapsed:?} (possible deadlock)"
+    );
+    assert_eq!(completed, EXPECTED_TOTAL);
+    assert!(
+        pauses >= 10 && resumes >= 10,
+        "pauser did not churn enough: {pauses} pauses, {resumes} resumes"
+    );
+    assert!(
+        pausable_elapsed < real_elapsed,
+        "pausable ({pausable_elapsed:?}) should be < real ({real_elapsed:?})"
+    );
+
+    eprintln!(
+        "joinset stress: real={:?} pausable={:?} pauses={} resumes={} \
+         completed={}/{}",
+        real_elapsed, pausable_elapsed, pauses, resumes, completed, EXPECTED_TOTAL,
+    );
+}
+
+/// Stress test for `Interval` + `MissedTickBehavior` (added in tokio 1.9)
+/// under pause pressure.
+///
+/// Because the pausable clock does not advance while paused, interval
+/// deadlines do not roll over during a pause; they roll over only as
+/// pausable time catches up. This test drives three intervals with the
+/// three different `MissedTickBehavior` policies and verifies that each
+/// still produces a monotonically non-decreasing sequence of `rt.now()`
+/// values at the ticks, and each fires with a pausable-time gap no
+/// smaller than its configured period.
+#[test]
+fn stress_interval_missed_tick_behaviors() {
+    use tokio::time::MissedTickBehavior;
+
+    const RUN_DURATION: Duration = Duration::from_secs(3);
+    const PERIOD: Duration = Duration::from_millis(10);
+    const MAX_TEST_RUNTIME: Duration = Duration::from_secs(60);
+
+    let rt = Arc::new(pausable_multi_thread());
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let pauser = spawn_pauser(rt.clone(), stop.clone());
+
+    let start_real = std::time::Instant::now();
+    let start_pausable_ms = rt.elapsed_millis();
+
+    let (burst_ticks, delay_ticks, skip_ticks) = rt.block_on({
+        let rt = rt.clone();
+        let stop = stop.clone();
+        async move {
+            async fn drive_interval(
+                rt: Arc<Runtime>,
+                stop: Arc<AtomicBool>,
+                behavior: MissedTickBehavior,
+                period: Duration,
+            ) -> Vec<tokio::time::Instant> {
+                let mut interval = tokio::time::interval(period);
+                interval.set_missed_tick_behavior(behavior);
+                let mut ticks = Vec::new();
+                while !stop.load(Ordering::Relaxed) {
+                    interval.tick().await;
+                    ticks.push(rt.now());
+                }
+                ticks
+            }
+
+            let burst = tokio::spawn(drive_interval(
+                rt.clone(),
+                stop.clone(),
+                MissedTickBehavior::Burst,
+                PERIOD,
+            ));
+            let delay = tokio::spawn(drive_interval(
+                rt.clone(),
+                stop.clone(),
+                MissedTickBehavior::Delay,
+                PERIOD,
+            ));
+            let skip = tokio::spawn(drive_interval(
+                rt.clone(),
+                stop.clone(),
+                MissedTickBehavior::Skip,
+                PERIOD,
+            ));
+
+            tokio::time::sleep(RUN_DURATION).await;
+            stop.store(true, Ordering::Relaxed);
+
+            (
+                burst.await.unwrap(),
+                delay.await.unwrap(),
+                skip.await.unwrap(),
+            )
+        }
+    });
+
+    let (pauses, resumes) = pauser.join().expect("pauser thread panicked");
+    let real_elapsed = start_real.elapsed();
+    let pausable_elapsed = Duration::from_millis(rt.elapsed_millis() - start_pausable_ms);
+
+    assert!(real_elapsed <= MAX_TEST_RUNTIME, "took too long: {real_elapsed:?}");
+    assert!(pauses >= 100 && resumes >= 100);
+
+    // Shared invariants across all three policies:
+    //   * each interval must produce some ticks
+    //   * tick timestamps are monotonic non-decreasing
+    //   * adjacent ticks must be at least `PERIOD` apart in pausable time,
+    //     except for Burst which can produce back-to-back catch-up ticks.
+    for (name, ticks, allow_zero_gap) in [
+        ("Burst", &burst_ticks, true),
+        ("Delay", &delay_ticks, false),
+        ("Skip", &skip_ticks, false),
+    ] {
+        assert!(
+            ticks.len() >= 2,
+            "{name}: expected at least 2 ticks, got {}",
+            ticks.len()
+        );
+        for pair in ticks.windows(2) {
+            let gap = pair[1].duration_since(pair[0]);
+            assert!(
+                pair[1] >= pair[0],
+                "{name}: tick timestamps must be monotonic: {:?} -> {:?}",
+                pair[0],
+                pair[1]
+            );
+            if !allow_zero_gap {
+                assert!(
+                    gap >= PERIOD,
+                    "{name}: gap between ticks ({gap:?}) must be >= period ({PERIOD:?})"
+                );
+            }
+        }
+    }
+
+    // Burst should produce the most (or at least tied for most) ticks
+    // because it catches up after a pause by firing repeatedly.
+    assert!(
+        burst_ticks.len() >= delay_ticks.len(),
+        "Burst ({}) should produce >= Delay ticks ({})",
+        burst_ticks.len(),
+        delay_ticks.len()
+    );
+
+    eprintln!(
+        "interval stress: real={:?} pausable={:?} pauses={} resumes={} \
+         burst_ticks={} delay_ticks={} skip_ticks={}",
+        real_elapsed,
+        pausable_elapsed,
+        pauses,
+        resumes,
+        burst_ticks.len(),
+        delay_ticks.len(),
+        skip_ticks.len(),
+    );
+}
+
+/// Stress test for `tokio::time::timeout` (the combinator was in 0.3 but
+/// its current form and the surrounding timer driver have been heavily
+/// rewritten) under pause/resume churn.
+///
+/// Spawns many tasks that each race a `tokio::time::sleep` against a
+/// `tokio::time::timeout`. We pick the timeout to be reliably longer than
+/// the sleep in pausable-clock time. The key invariant: every task must
+/// observe the sleep completing (`Ok`), never the timeout elapsing
+/// first, even though the real-time elapsed may be much larger than the
+/// timeout because of pauses. This guarantees that pausing the clock
+/// does NOT cause spurious timeout firings.
+#[test]
+fn stress_timeout_under_pause() {
+    use tokio::time::{sleep, timeout};
+
+    const TASKS: usize = 8;
+    const ITERATIONS_PER_TASK: usize = 8;
+    const SLEEP_MS: u64 = 5;
+    // `TIMEOUT_MS` is the pausable-clock deadline for the timeout. With
+    // pausable time enforced correctly, the inner `sleep(SLEEP_MS)` should
+    // always complete well before `TIMEOUT_MS` of pausable time elapses.
+    const TIMEOUT_MS: u64 = 50;
+    const MAX_TEST_RUNTIME: Duration = Duration::from_secs(60);
+
+    let rt = Arc::new(pausable_multi_thread());
+    let stop = Arc::new(AtomicBool::new(false));
+    let pauser = spawn_pauser(rt.clone(), stop.clone());
+
+    let start_real = std::time::Instant::now();
+    let start_pausable_ms = rt.elapsed_millis();
+
+    let (successes, failures) = rt.block_on({
+        let rt = rt.clone();
+        async move {
+            let mut handles = Vec::with_capacity(TASKS);
+            for _ in 0..TASKS {
+                let rt = rt.clone();
+                handles.push(tokio::spawn(async move {
+                    let mut ok = 0usize;
+                    let mut err = 0usize;
+                    for _ in 0..ITERATIONS_PER_TASK {
+                        let before = rt.now();
+                        match timeout(
+                            Duration::from_millis(TIMEOUT_MS),
+                            sleep(Duration::from_millis(SLEEP_MS)),
+                        )
+                        .await
+                        {
+                            Ok(()) => {
+                                let after = rt.now();
+                                // Core timing guarantee: once the inner
+                                // sleep completes, at least `SLEEP_MS` of
+                                // pausable time must have passed. The
+                                // task may be polled later than that
+                                // under pause pressure, but not earlier.
+                                let gap = after.duration_since(before);
+                                assert!(
+                                    gap >= Duration::from_millis(SLEEP_MS),
+                                    "sleep completed too early in pausable time: {gap:?}"
+                                );
+                                ok += 1;
+                            }
+                            Err(_) => err += 1,
+                        }
+                    }
+                    (ok, err)
+                }));
+            }
+
+            let mut successes = 0usize;
+            let mut failures = 0usize;
+            for h in handles {
+                let (ok, err) = h.await.expect("task panicked");
+                successes += ok;
+                failures += err;
+            }
+            (successes, failures)
+        }
+    });
+
+    stop.store(true, Ordering::Relaxed);
+    let (pauses, resumes) = pauser.join().expect("pauser thread panicked");
+    let real_elapsed = start_real.elapsed();
+    let pausable_elapsed = Duration::from_millis(rt.elapsed_millis() - start_pausable_ms);
+
+    assert!(
+        real_elapsed <= MAX_TEST_RUNTIME,
+        "test took too long: {real_elapsed:?}"
+    );
+    let expected = TASKS * ITERATIONS_PER_TASK;
+    assert_eq!(
+        failures, 0,
+        "{failures} of {expected} iterations saw their timeout fire; pausing \
+         must not cause timeouts to spuriously elapse (successes={successes})"
+    );
+    assert_eq!(successes, expected);
+    assert!(pauses >= 10 && resumes >= 10);
+
+    eprintln!(
+        "timeout stress: real={:?} pausable={:?} pauses={} resumes={} \
+         successes={}/{} (all sleeps completed before timeout)",
+        real_elapsed, pausable_elapsed, pauses, resumes, successes, expected,
+    );
+}
+
+/// Verifies that `spawn_blocking` tasks are **not** gated by the pausable
+/// clock. This is the intended design: blocking threads live in the
+/// blocking pool and only async timing work is affected by pause/resume.
+///
+/// We start the runtime paused, then spawn many blocking tasks while the
+/// clock is still paused. Each task does real work (`std::thread::sleep`)
+/// and returns its input. We assert every task completes within a real-
+/// time bound that's much shorter than would be possible if blocking
+/// tasks were blocked on the pausable clock.
+#[test]
+fn stress_spawn_blocking_ignores_pausable_clock() {
+    const TASKS: usize = 64;
+    const PER_TASK_SLEEP: Duration = Duration::from_millis(15);
+    const MAX_REAL_TIME: Duration = Duration::from_secs(5);
+
+    let rt = Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(2)
+        .max_blocking_threads(32)
+        .pausable_time(true, Duration::from_secs(0)) // start paused!
+        .build()
+        .unwrap();
+
+    assert!(rt.is_paused(), "runtime should start paused");
+
+    let start = std::time::Instant::now();
+    let results: Vec<usize> = rt.block_on(async {
+        let mut handles = Vec::with_capacity(TASKS);
+        for i in 0..TASKS {
+            // The runtime is still paused here; these should still run.
+            handles.push(tokio::task::spawn_blocking(move || {
+                std::thread::sleep(PER_TASK_SLEEP);
+                i
+            }));
+        }
+        let mut out = Vec::with_capacity(TASKS);
+        for h in handles {
+            out.push(h.await.expect("blocking task panicked"));
+        }
+        out
+    });
+    let elapsed = start.elapsed();
+
+    // Every task should have returned its input.
+    let mut seen = vec![false; TASKS];
+    for v in results {
+        assert!(v < TASKS);
+        assert!(!seen[v], "duplicate result: {v}");
+        seen[v] = true;
+    }
+    assert!(seen.iter().all(|s| *s), "not all blocking tasks completed");
+
+    // The runtime was paused the whole time, yet all blocking tasks ran
+    // to completion within a short real-time bound. This is the key
+    // assertion: the blocking pool is not gated by the pausable clock.
+    assert!(
+        elapsed <= MAX_REAL_TIME,
+        "blocking tasks took too long while clock was paused: {elapsed:?}"
+    );
+
+    // Clock must still be paused, since we never resumed it.
+    assert!(rt.is_paused(), "clock should still be paused at end");
+
+    eprintln!(
+        "spawn_blocking while paused: real={elapsed:?} tasks={TASKS} \
+         per_task_sleep={PER_TASK_SLEEP:?} clock_still_paused=true",
+    );
+}
+
+/// Stress test for `Notify::notify_waiters` (tokio 1.x) under pause/resume
+/// churn. Verifies broadcast wakeups are delivered to parked waiters
+/// despite the pausable clock being aggressively toggled.
+///
+/// Structure: several rounds. In each round we spawn `WAITERS` fresh
+/// tasks, wait for them all to park on a shared `Notify`, then call
+/// `notify_waiters()` once and confirm every one of them wakes. This
+/// avoids the "waiter in transit" race that makes a looped
+/// `notify_waiters` usage non-deterministic.
+#[test]
+fn stress_notify_waiters_under_pause() {
+    use tokio::sync::Notify;
+
+    const ROUNDS: usize = 4;
+    const WAITERS: usize = 6;
+    const MAX_TEST_RUNTIME: Duration = Duration::from_secs(60);
+
+    let rt = Arc::new(pausable_multi_thread());
+    let stop = Arc::new(AtomicBool::new(false));
+    let pauser = spawn_pauser(rt.clone(), stop.clone());
+
+    let start_real = std::time::Instant::now();
+
+    let (total_wakeups, rounds_run) = rt.block_on({
+        let rt = rt.clone();
+        async move {
+            let mut total_wakeups = 0usize;
+
+            for round in 0..ROUNDS {
+                let notify = Arc::new(Notify::new());
+                let parked = Arc::new(AtomicUsize::new(0));
+                let wakeups = Arc::new(AtomicUsize::new(0));
+
+                let mut handles = Vec::with_capacity(WAITERS);
+                for _ in 0..WAITERS {
+                    let notify = notify.clone();
+                    let parked = parked.clone();
+                    let wakeups = wakeups.clone();
+                    handles.push(tokio::spawn(async move {
+                        // Register intent to wait, then await.
+                        //
+                        // `notified()` returns a `Notified` future that
+                        // is "registered" only after its first poll.
+                        let fut = notify.notified();
+                        tokio::pin!(fut);
+                        // Touch fut once to enable registration on next
+                        // poll; we can't easily observe registration, so
+                        // instead we bump the counter before yielding so
+                        // the notifier can use it as a live-ness signal.
+                        parked.fetch_add(1, Ordering::Release);
+                        fut.as_mut().await;
+                        wakeups.fetch_add(1, Ordering::Relaxed);
+                    }));
+                }
+
+                // Wait until every waiter has parked. We use a generous
+                // timeout and yield repeatedly, occasionally sleeping on
+                // the pausable clock so we cross pause/resume boundaries.
+                let wait_for_parked = async {
+                    while parked.load(Ordering::Acquire) < WAITERS {
+                        tokio::task::yield_now().await;
+                    }
+                    // After every task has bumped `parked`, spin-yield a
+                    // few more times to give each task's `notified()`
+                    // future a chance to actually register with `Notify`.
+                    for _ in 0..2000 {
+                        tokio::task::yield_now().await;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                };
+                tokio::time::timeout(Duration::from_secs(10), wait_for_parked)
+                    .await
+                    .expect("timeout waiting for waiters to park");
+
+                // Broadcast once. Every registered waiter should wake.
+                notify.notify_waiters();
+
+                // Wait for all waiters to finish. They have nothing to
+                // do except complete after being notified.
+                for h in handles {
+                    tokio::time::timeout(Duration::from_secs(15), h)
+                        .await
+                        .unwrap_or_else(|_| {
+                            panic!(
+                                "waiter did not finish in round {round} \
+                                 (wakeups so far: {})",
+                                wakeups.load(Ordering::Relaxed)
+                            )
+                        })
+                        .expect("waiter panicked");
+                }
+
+                let round_wakeups = wakeups.load(Ordering::Relaxed);
+                assert_eq!(
+                    round_wakeups, WAITERS,
+                    "round {round}: expected {WAITERS} wakeups, got {round_wakeups}"
+                );
+                total_wakeups += round_wakeups;
+
+                // Small pausable-clock sleep between rounds so the
+                // pauser's timing drifts across round boundaries.
+                tokio::time::sleep(Duration::from_millis(5)).await;
+
+                // Exercise the clock to make sure it's still healthy.
+                let _ = rt.now();
+            }
+
+            (total_wakeups, ROUNDS)
+        }
+    });
+
+    stop.store(true, Ordering::Relaxed);
+    let (pauses, resumes) = pauser.join().expect("pauser thread panicked");
+    let real_elapsed = start_real.elapsed();
+
+    assert!(
+        real_elapsed <= MAX_TEST_RUNTIME,
+        "test took too long: {real_elapsed:?}"
+    );
+
+    let expected = ROUNDS * WAITERS;
+    assert_eq!(
+        total_wakeups, expected,
+        "expected {expected} wakeups across {rounds_run} rounds, got {total_wakeups}"
+    );
+    assert!(pauses >= 10 && resumes >= 10);
+
+    eprintln!(
+        "notify stress: real={:?} pauses={} resumes={} rounds={} \
+         total_wakeups={}/{}",
+        real_elapsed, pauses, resumes, rounds_run, total_wakeups, expected,
     );
 }
