@@ -1,0 +1,78 @@
+Update `tokio/Cargo.toml` metadata and add a top-of-file doc note in
+`tokio/src/lib.rs` so that `crates.io` and `docs.rs` both clearly
+present the published artifact as `pausable-tokio` rather than as
+plain tokio.
+
+This is a publish-time-only patch. It depends on patches 0001..0004
+already being applied (it does not touch any source code those
+patches would conflict with).
+
+Cargo.toml metadata changes:
+
+  * `repository`    -> https://github.com/RookAndPawn/pausable-tokio
+  * `homepage`      -> https://github.com/RookAndPawn/pausable-tokio
+  * `documentation` -> https://docs.rs/pausable-tokio (added; not in upstream)
+  * `description`   -> short pausable-tokio summary
+  * `categories`    -> add "simulation" to the existing list
+  * `keywords`      -> left as-is (upstream's "io"/"async"/"non-blocking"/
+                       "futures" are still accurate)
+
+`lib.rs` change: prepend a short `//!` doc block at the top of the
+crate-level docs that explains this crate is `pausable-tokio`, points
+at the runtime methods that differ, and shows the `Cargo.toml` snippet
+for the typical "rename to tokio" usage. The original upstream tokio
+docs follow after a horizontal rule.
+diff --git a/tokio/Cargo.toml b/tokio/Cargo.toml
+index b0bedbed..3f748fd1 100644
+--- a/tokio/Cargo.toml
++++ b/tokio/Cargo.toml
+@@ -12,13 +12,15 @@ rust-version = "1.71"
+ authors = ["Tokio Contributors <team@tokio.rs>"]
+ license = "MIT"
+ readme = "README.md"
+-repository = "https://github.com/tokio-rs/tokio"
+-homepage = "https://tokio.rs"
++repository = "https://github.com/RookAndPawn/pausable-tokio"
++homepage = "https://github.com/RookAndPawn/pausable-tokio"
++documentation = "https://docs.rs/pausable-tokio"
+ description = """
+-An event-driven, non-blocking I/O platform for writing asynchronous I/O
+-backed applications.
++A fork of tokio that adds a runtime-controllable pause/resume primitive
++on its clock. Drop-in replacement for tokio with a few extra methods on
++the Builder and Runtime types.
+ """
+-categories = ["asynchronous", "network-programming"]
++categories = ["asynchronous", "network-programming", "simulation"]
+ keywords = ["io", "async", "non-blocking", "futures"]
+ 
+ [features]
+diff --git a/tokio/src/lib.rs b/tokio/src/lib.rs
+index 7da7e21f..1690e944 100644
+--- a/tokio/src/lib.rs
++++ b/tokio/src/lib.rs
+@@ -23,6 +23,24 @@
+ #![cfg_attr(loom, allow(dead_code, unreachable_pub))]
+ #![cfg_attr(windows, allow(rustdoc::broken_intra_doc_links))]
+ 
++//! `pausable-tokio` is a fork of [`tokio`] that adds a runtime-
++//! controllable pause/resume primitive on its clock. The rest of the
++//! tokio API is unchanged; see
++//! [`Builder::pausable_time`](crate::runtime::Builder::pausable_time)
++//! and the methods on [`Runtime`](crate::runtime::Runtime) (`pause`,
++//! `resume`, `wait_for_resume`, `run_unpausable`, etc.) for the
++//! pausable-specific bits, and the rest of these docs (inherited from
++//! upstream tokio) for everything else.
++//!
++//! ```toml
++//! [dependencies]
++//! tokio = { package = "pausable-tokio", version = "1.52.1", features = ["full"] }
++//! ```
++//!
++//! [`tokio`]: https://docs.rs/tokio
++//!
++//! ----
++//!
+ //! A runtime for writing reliable network applications without compromising speed.
+ //!
+ //! Tokio is an event-driven, non-blocking I/O platform for writing asynchronous

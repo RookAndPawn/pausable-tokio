@@ -3,10 +3,12 @@
 #
 # Usage:
 #   ./apply.sh                              # apply 0001 + 0002 + 0003
-#   ./apply.sh --with-rename                # apply all 4 (one-shot publish flow)
+#   ./apply.sh --with-rename                # apply all six (one-shot publish flow:
+#                                             0001 + 0002 + 0003 + 0004 + 0005 + 0006)
 #   ./apply.sh --no-tests                   # apply 0001 + 0002 only
-#   ./apply.sh --rename-only                # apply 0004 only on top of an
-#                                             already-patched submodule
+#   ./apply.sh --rename-only                # apply 0004 + 0005 + 0006 (publish-time
+#                                             metadata) on top of an already-patched
+#                                             submodule
 #   ./apply.sh --check                      # dry-run: verify hunks would land
 #   ./apply.sh --reset                      # reset the submodule to its
 #                                             current HEAD before applying
@@ -41,17 +43,23 @@ include_runtime=1
 include_deps=1
 include_tests=1
 include_rename=0
+include_publish_meta=0  # patches 0005 + 0006: README + Cargo.toml + lib.rs
 check_only=0
 reset_first=0
 tokio_version=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --with-rename)  include_rename=1; shift ;;
+        --with-rename)
+            include_rename=1
+            include_publish_meta=1
+            shift
+            ;;
         --no-tests)     include_tests=0; shift ;;
         --rename-only)
             include_runtime=0; include_deps=0; include_tests=0
             include_rename=1
+            include_publish_meta=1
             shift
             ;;
         --check)        check_only=1; shift ;;
@@ -151,6 +159,10 @@ patches=()
 [[ "$include_deps"    -eq 1 ]] && patches+=("$PATCH_DIR/0002-pausable-time-deps.patch")
 [[ "$include_tests"   -eq 1 ]] && patches+=("$PATCH_DIR/0003-pausable-time-tests.patch")
 [[ "$include_rename"  -eq 1 ]] && patches+=("$PATCH_DIR/0004-rename-for-crates-io.patch")
+if [[ "$include_publish_meta" -eq 1 ]]; then
+    patches+=("$PATCH_DIR/0005-publish-readme.patch")
+    patches+=("$PATCH_DIR/0006-publish-cargo-metadata-and-lib-rs-note.patch")
+fi
 
 if [[ ${#patches[@]} -eq 0 ]]; then
     echo "error: nothing to apply (all patch groups are disabled)" >&2

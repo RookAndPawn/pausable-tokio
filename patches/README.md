@@ -16,18 +16,22 @@ just "bump the submodule, see if patches still apply, fix what doesn't."
 | 0002 | `0002-pausable-time-deps.patch` | `tokio/Cargo.toml` | Adds the optional `pausable_clock = "1.0.2"` dependency and pulls it into the existing `time` feature. |
 | 0003 | `0003-pausable-time-tests.patch` | `tests-integration/**` | Adds the `rt-time-pausable` cargo feature on `tests-integration` and the `tests/rt_pausable_time.rs` integration-test file (correctness tests + 6 stress tests). |
 | 0004 | `0004-rename-for-crates-io.patch` | `tokio/Cargo.toml`, `Cargo.toml` (workspace) | Renames the crate from `tokio` to `pausable-tokio` and detaches it from the parent workspace so `cargo publish` works. Apply only at publish time. |
+| 0005 | `0005-publish-readme.patch` | `tokio/README.md` | Replaces upstream tokio's README with a `pausable-tokio`-specific one for the crates.io listing. Apply only at publish time. |
+| 0006 | `0006-publish-cargo-metadata-and-lib-rs-note.patch` | `tokio/Cargo.toml`, `tokio/src/lib.rs` | Updates `description`, `repository`, `homepage`, `documentation`, `categories` in `tokio/Cargo.toml`, and adds a top-of-file `//!` doc note in `tokio/src/lib.rs` so docs.rs's crate-level page leads with a "this is pausable-tokio" header. Apply only at publish time. |
 
 The patches have a logical dependency order:
 
 ```
-0001 ──► 0002 ──► 0003 ──► 0004
+0001 ──► 0002 ──► 0003 ──► 0004 ──► 0005 ──► 0006
                                     (each step depends on the previous)
 ```
 
 `0001` references the `pausable_clock` crate, so the runtime won't
 compile without `0002` also applied. `0003` consumes the public
-`Runtime::pause` etc. API from `0001`. `0004` is independent of
-everything but should be applied last (and only at publish time).
+`Runtime::pause` etc. API from `0001`. `0004`, `0005`, and `0006` are
+the publish-time-only patches: they only get applied when you're
+preparing the artifact for `cargo publish`. None of them affect the
+runtime's behavior, so they're safe to skip during local development.
 
 ## Workflows
 
@@ -142,9 +146,9 @@ dev.
 
 ```text
 ./apply.sh                              # 0001 + 0002 + 0003 (dev state)
-./apply.sh --with-rename                # 0001..0004 (one-shot publish)
+./apply.sh --with-rename                # 0001..0006 (one-shot publish)
 ./apply.sh --no-tests                   # 0001 + 0002 only
-./apply.sh --rename-only                # 0004 only (when 0001..0003
+./apply.sh --rename-only                # 0004 + 0005 + 0006 (when 0001..0003
                                           already applied)
 ./apply.sh --check                      # `git apply --check` mode
 ./apply.sh --reset                      # `git reset --hard` the
@@ -173,15 +177,24 @@ want the patches to reflect the new state, regenerate them with:
 
 ```sh
 cd tokio-upstream
-# Patches are split by directory; regenerate them in matching order.
+# Patches 0001-0003 are split by directory; the publish-time patches
+# 0005 and 0006 are split by file. 0004 is hand-maintained.
 git diff HEAD -- 'tokio/src/'         > ../patches/0001-pausable-time-runtime.patch
 git diff HEAD -- 'tokio/Cargo.toml'   > ../patches/0002-pausable-time-deps.patch
 git diff HEAD -- 'tests-integration/' > ../patches/0003-pausable-time-tests.patch
-# 0004 is hand-maintained; only edit it if the rename target name changes.
+# 0004 is hand-maintained; only edit if the rename target changes.
+git diff HEAD -- 'tokio/README.md'              > ../patches/0005-publish-readme.patch
+git diff HEAD -- 'tokio/Cargo.toml' 'tokio/src/lib.rs' \
+                                                > ../patches/0006-publish-cargo-metadata-and-lib-rs-note.patch
 cd ..
 git add patches
 git commit -m "regenerate patches"
 ```
+
+Note that 0002 and 0006 both touch `tokio/Cargo.toml`, but in different
+hunks (the `[features]`/`[dependencies]` tables for 0002, the
+`[package]` metadata for 0006), so both patches apply in sequence
+without conflict.
 
 The submodule's pinned commit is the diff base -- so as long as
 `tokio-upstream/.git/HEAD` is your latest commit on top of that pinned
