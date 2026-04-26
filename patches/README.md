@@ -1,10 +1,12 @@
 # pausable-tokio patches
 
-A small, ordered set of patches that turn upstream
-[`tokio-rs/tokio`](https://github.com/tokio-rs/tokio) into the
-`pausable-tokio` fork. The patches are kept in this directory so the
-fork can be re-synced with new upstream tokio releases without doing a
-full rebase.
+A small, ordered set of patches that turn the
+[`tokio-rs/tokio`](https://github.com/tokio-rs/tokio) submodule
+checked out at `../tokio-upstream/` into the `pausable-tokio` fork.
+
+The fork is maintained as patches (rather than as a long-lived rebase
+or in-tree copy) so that re-syncing with new upstream tokio releases is
+just "bump the submodule, see if patches still apply, fix what doesn't."
 
 ## What each patch does
 
@@ -13,10 +15,9 @@ full rebase.
 | 0001 | `0001-pausable-time-runtime.patch` | `tokio/src/**` | All Rust source changes: pausable-clock-backed `Clock`, `Builder::pausable_time`, `Runtime::pause` / `resume` / `wait_for_resume` / `run_unpausable` / etc., wrapping `task.run()` in both schedulers, and the `wait_for_resume` hook in the time driver's `park_thread_timeout`. |
 | 0002 | `0002-pausable-time-deps.patch` | `tokio/Cargo.toml` | Adds the optional `pausable_clock = "1.0.2"` dependency and pulls it into the existing `time` feature. |
 | 0003 | `0003-pausable-time-tests.patch` | `tests-integration/**` | Adds the `rt-time-pausable` cargo feature on `tests-integration` and the `tests/rt_pausable_time.rs` integration-test file (correctness tests + 6 stress tests). |
-| 0004 | `0004-rename-for-crates-io.patch` | `tokio/Cargo.toml`, `Cargo.toml` (workspace) | Renames the crate from `tokio` to `pausable-tokio` and detaches it from the parent workspace (adds an empty `[workspace]` to `tokio/Cargo.toml`, drops the `tokio` member entry and the dangling `[patch.crates-io]` line, and removes the `[lints] workspace = true` block that's no longer applicable). Apply this **only** at publish time. |
+| 0004 | `0004-rename-for-crates-io.patch` | `tokio/Cargo.toml`, `Cargo.toml` (workspace) | Renames the crate from `tokio` to `pausable-tokio` and detaches it from the parent workspace so `cargo publish` works. Apply only at publish time. |
 
-Each patch is independent of the next at the *file* level, but they
-have a logical dependency order:
+The patches have a logical dependency order:
 
 ```
 0001 ──► 0002 ──► 0003 ──► 0004
@@ -26,67 +27,83 @@ have a logical dependency order:
 `0001` references the `pausable_clock` crate, so the runtime won't
 compile without `0002` also applied. `0003` consumes the public
 `Runtime::pause` etc. API from `0001`. `0004` is independent of
-everything but should be applied last (see why below).
+everything but should be applied last (and only at publish time).
 
 ## Workflows
 
-### Syncing with a new upstream tokio release
+### One-time setup
 
 ```sh
-# 1. Start with a clean checkout of the new upstream tokio tag.
-git clone https://github.com/tokio-rs/tokio.git tokio-1.53.0
-cd tokio-1.53.0
+# Already cloned without --recurse-submodules? Catch up:
+git submodule update --init --recursive
+```
+
+### Syncing to a new upstream tokio release
+
+```sh
+# Bump the submodule's pinned commit to the new tag.
+cd tokio-upstream
+git fetch
 git checkout tokio-1.53.0
+cd ..
 
-# 2. Apply the runtime + deps + tests patches.
-git apply /path/to/patches/0001-pausable-time-runtime.patch
-git apply /path/to/patches/0002-pausable-time-deps.patch
-git apply /path/to/patches/0003-pausable-time-tests.patch
+# See if the patches still apply on top of the new upstream.
+./patches/apply.sh --check
 
-# 3. Build and run the existing tokio test suite to confirm the
-#    upstream changes haven't broken our pausable code paths.
+# If they do: apply them and verify the build/tests still work.
+./patches/apply.sh
+cd tokio-upstream
 cargo build -p tokio --features=full
-
-# 4. Run the pausable-specific integration tests.
 cargo test -p tests-integration --release \
     --features=rt-time-pausable --test rt_pausable_time \
     -- --test-threads=1 --nocapture
+cd ..
+
+# Commit the submodule bump.
+git add tokio-upstream
+git commit -m "sync to tokio-1.53.0"
 ```
 
-If a patch fails to apply because upstream has rewritten one of the
-hunks, the patch can usually be updated by hand against the new
-upstream and committed back to this directory.
+If `--check` reports a patch that no longer applies, the fix workflow
+is the standard one for unified-diff conflicts: edit the patch by hand
+to match the new upstream context, or apply with `--reject` and merge
+the rejected hunks manually. Once the patches are clean, regenerate
+them as described under "Regenerating the patches" below and commit
+the updated patches alongside the submodule bump.
 
 ### Publishing to crates.io
 
-`crates.io` doesn't care about git history — it packages the **current
-file state** at publish time. So a patch-based publish flow works
+`crates.io` doesn't care about git history -- it packages the **current
+file state** at publish time. So a patch-driven publish flow works
 fine; you just need to apply patches first.
 
 ```sh
-# (from a fresh checkout already on the desired tokio tag)
-./apply.sh --with-rename
+# Make sure the submodule is at its pinned tag with no leftover edits.
+./patches/apply.sh --reset --with-rename
 
 # Publish from inside the renamed crate. The rename patch detaches
 # `tokio/` from the parent workspace, so cargo packages and verifies
 # it standalone.
-cd tokio
+cd tokio-upstream/tokio
 cargo publish --dry-run --allow-dirty   # sanity-check
 cargo publish --allow-dirty             # for real
 ```
 
-`--allow-dirty` is required because the patches are not committed; if
-you'd rather have a tidy git record, `git add -A && git commit -m
-'pausable-tokio v1.x.y'` between the apply step and `cargo publish` and
-drop `--allow-dirty`. Either way the published artifact is identical.
+`--allow-dirty` is required because the patches are applied to the
+submodule's working tree and not committed inside the submodule. (The
+parent repo only tracks the submodule's pinned commit, not its
+in-flight edits.) If you want a tidy git record you can `git commit`
+inside the submodule before publishing and drop `--allow-dirty`;
+either way the published artifact is byte-for-byte identical.
 
-If you've already been doing development on the patched tree (i.e.,
-patches 0001-0003 are applied and you've run `cargo build`/`cargo test`
-in the workspace), you can apply just the rename on top:
+If you've already been doing development on the patched submodule
+(0001-0003 applied, `cargo build`/`cargo test` runs in `target/`), just
+add the rename on top:
 
 ```sh
-./apply.sh --rename-only
-cd tokio && cargo publish --allow-dirty
+./patches/apply.sh --rename-only
+cd tokio-upstream/tokio
+cargo publish --allow-dirty
 ```
 
 This works because the rename patch simultaneously detaches `tokio/`
@@ -95,55 +112,68 @@ from the parent workspace, so prior workspace state doesn't trip up
 
 ### Local development on the fork itself
 
-For day-to-day development on the pausable code (running tokio's own
-tests under the `tokio::` namespace, hacking on the implementation),
-apply only patches `0001`, `0002`, and `0003`. Skip `0004`.
+For day-to-day development on the pausable code, apply only patches
+`0001`, `0002`, and `0003`. Skip `0004`.
 
-The rename patch is technically safe to apply during dev — it
+The rename patch is technically safe to apply during dev -- it
 preserves a coherent workspace by detaching `tokio/` and dropping the
-parent workspace's `tokio` references — but tokio's own internal tests
-(in `tokio/tests/`) reference items as `tokio::...` paths. Renaming
-the crate to `pausable-tokio` would require either rewriting all those
-test paths or running them with a `tokio = "pausable-tokio"` rename
-in the dev-deps. Easier to just keep the original name during dev.
+parent workspace's `tokio` references -- but tokio's own internal
+tests (in `tokio/tests/`) reference items as `tokio::...` paths.
+Renaming the crate to `pausable-tokio` would require either rewriting
+all those test paths or running them with a `tokio = "pausable-tokio"`
+rename in the dev-deps. Easier to just keep the original name during
+dev.
 
-## Verifying the patches
+## `apply.sh` reference
 
-The patches in this directory were generated with `git diff` against
-the `tokio-1.52.1` upstream tag. To verify they apply cleanly to that
-tag at any time:
-
-```sh
-mkdir -p /tmp/verify && cd /tmp/verify
-git clone https://github.com/tokio-rs/tokio.git . 2>/dev/null || \
-    (cd /tmp/verify && git fetch https://github.com/tokio-rs/tokio.git tokio-1.52.1)
-git checkout tokio-1.52.1
-
-for p in /path/to/patches/0001-*.patch \
-         /path/to/patches/0002-*.patch \
-         /path/to/patches/0003-*.patch \
-         /path/to/patches/0004-*.patch; do
-    git apply --check "$p" || { echo "patch failed: $p"; exit 1; }
-    git apply "$p"
-done
+```text
+./apply.sh                  # 0001 + 0002 + 0003 (development state)
+./apply.sh --with-rename    # 0001 + 0002 + 0003 + 0004 (one-shot publish)
+./apply.sh --no-tests       # 0001 + 0002 only (minimal viable build)
+./apply.sh --rename-only    # 0004 only (use when 0001..0003 are
+                              already applied)
+./apply.sh --check          # `git apply --check` mode: don't apply,
+                              just verify hunks would land cleanly
+./apply.sh --reset          # `git reset --hard` the submodule first
+                              (discards uncommitted edits inside it),
+                              then apply requested patches
 ```
 
-`apply.sh` in this directory automates the apply step.
+Combine flags freely: `./apply.sh --reset --with-rename` reapplies
+the entire fork from a clean submodule, ready to publish.
 
 ## Regenerating the patches
 
-If you make local changes to the `pausable-tokio` fork's master branch
-and want the patches to reflect the new state, regenerate them with:
+If you've made local changes inside the `tokio-upstream` submodule and
+want the patches to reflect the new state, regenerate them with:
 
 ```sh
-# From the fork's repo root, with master pointing at the new state and
-# the upstream tokio-1.52.1 tag still present:
-git diff tokio-1.52.1..HEAD -- 'tokio/src/'           > patches/0001-pausable-time-runtime.patch
-git diff tokio-1.52.1..HEAD -- 'tokio/Cargo.toml'     > patches/0002-pausable-time-deps.patch
-git diff tokio-1.52.1..HEAD -- 'tests-integration/'   > patches/0003-pausable-time-tests.patch
+cd tokio-upstream
+# Patches are split by directory; regenerate them in matching order.
+git diff HEAD -- 'tokio/src/'         > ../patches/0001-pausable-time-runtime.patch
+git diff HEAD -- 'tokio/Cargo.toml'   > ../patches/0002-pausable-time-deps.patch
+git diff HEAD -- 'tests-integration/' > ../patches/0003-pausable-time-tests.patch
 # 0004 is hand-maintained; only edit it if the rename target name changes.
+cd ..
+git add patches
+git commit -m "regenerate patches"
 ```
 
-Bumping the upstream base after a sync is the same: re-tag `master`'s
-upstream-base point and run the four `git diff` commands against that
-new tag.
+The submodule's pinned commit is the diff base -- so as long as
+`tokio-upstream/.git/HEAD` is your latest commit on top of that pinned
+commit, the `git diff HEAD` invocations above produce a clean
+"diff against the upstream tag with all my fork changes" patch set.
+
+## Verifying the patches apply to a clean upstream
+
+```sh
+# Reset the submodule to its pinned tag, then dry-run-apply.
+./patches/apply.sh --reset --check
+```
+
+If you've changed the pinned tag (e.g., during a sync) and want to be
+sure all four patches still apply, also run:
+
+```sh
+./patches/apply.sh --reset --with-rename --check
+```

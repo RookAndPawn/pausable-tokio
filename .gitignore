@@ -1,6 +1,11 @@
-target
-Cargo.lock
+# The submodule has its own .gitignore (target/, Cargo.lock, etc.); we
+# only need rules for stuff we might create at the parent-repo level.
 
-.cargo/config.toml
-.cargo/config
+# editor files
+.vscode/
+.idea/
+*.swp
+*.swo
 
+# macOS
+.DS_Store
