@@ -84,7 +84,7 @@ index 567c7332..a0fc8d19 100644
 -* A reactor backed by the operating system's event queue (epoll, kqueue,
 -  IOCP, etc.).
 -* Asynchronous [TCP and UDP][net] sockets.
-+[mit-url]: https://github.com/RookAndPawn/pausable-tokio/blob/master/LICENSE
++[mit-url]: https://github.com/RookAndPawn/pausable-tokio/blob/main/LICENSE
  
 -These components provide the runtime components necessary for building
 -an asynchronous application.

@@ -170,7 +170,20 @@ esac
 
 echo
 echo "==> 4/8  cargo publish --dry-run"
-(cd tokio-upstream/tokio && cargo publish --dry-run --allow-dirty)
+# We pass the same RUSTFLAGS / RUSTDOCFLAGS that tokio's docs.rs build
+# uses (see tokio/docs/contributing/pull-requests.md). The
+# `tokio_unstable` cfg ensures the cargo-publish verification build
+# exercises unstable code paths, and `docsrs` keeps any
+# `#[cfg(docsrs)]`-gated items in scope. Both flags are harmless when
+# the relevant code paths aren't present, but matching upstream's
+# documented setup means we catch issues that docs.rs itself would
+# otherwise surface only after the crate is already on crates.io.
+(
+    cd tokio-upstream/tokio
+    RUSTFLAGS="--cfg docsrs --cfg tokio_unstable" \
+    RUSTDOCFLAGS="--cfg docsrs --cfg tokio_unstable" \
+        cargo publish --dry-run --allow-dirty --all-features
+)
 
 # ------------------------------------------------------------------
 # Phase 5: confirmation.
@@ -213,7 +226,12 @@ fi
 
 echo
 echo "==> 5/8  cargo publish (real)"
-(cd tokio-upstream/tokio && cargo publish --allow-dirty)
+(
+    cd tokio-upstream/tokio
+    RUSTFLAGS="--cfg docsrs --cfg tokio_unstable" \
+    RUSTDOCFLAGS="--cfg docsrs --cfg tokio_unstable" \
+        cargo publish --allow-dirty --all-features
+)
 
 # ------------------------------------------------------------------
 # Phase 6: reset the submodule's working tree.
