@@ -1,0 +1,744 @@
+diff --git a/tokio/src/runtime/builder.rs b/tokio/src/runtime/builder.rs
+index 6032f2c6..f9dc748e 100644
+--- a/tokio/src/runtime/builder.rs
++++ b/tokio/src/runtime/builder.rs
+@@ -69,6 +69,12 @@ pub struct Builder {
+     /// Whether or not the clock should start paused.
+     start_paused: bool,
+ 
++    /// Pausable time configuration. When `Some`, the runtime uses a
++    /// pausable clock that can be paused/resumed at runtime even without the
++    /// `test-util` feature.
++    #[cfg(feature = "time")]
++    pausable_time_cfg: Option<crate::runtime::PausableTimeConfig>,
++
+     /// The number of worker threads, used by Runtime.
+     ///
+     /// Only used when not using the current-thread executor.
+@@ -293,6 +299,11 @@ impl Builder {
+             // The clock starts not-paused
+             start_paused: false,
+ 
++            // No pausable-time config by default; this is only set when the
++            // user calls `Builder::pausable_time`.
++            #[cfg(feature = "time")]
++            pausable_time_cfg: None,
++
+             // Read from environment variable first in multi-threaded mode.
+             // Default to lazy auto-detection (one thread per CPU core)
+             worker_threads: None,
+@@ -1109,6 +1120,8 @@ impl Builder {
+             enable_io: self.enable_io,
+             enable_time: self.enable_time,
+             start_paused: self.start_paused,
++            #[cfg(feature = "time")]
++            pausable_time_cfg: self.pausable_time_cfg,
+             nevents: self.nevents,
+             timer_flavor: self.timer_flavor,
+         }
+@@ -1848,6 +1861,61 @@ cfg_test_util! {
+     }
+ }
+ 
++cfg_time! {
++    impl Builder {
++        /// Configures the runtime to use a pausable clock.
++        ///
++        /// When enabled, the runtime's clock is backed by
++        /// [`pausable_clock::PausableClock`] and can be paused and resumed at
++        /// runtime using [`Runtime::pause`] / [`Runtime::resume`]. This differs
++        /// from [`Builder::start_paused`] (which requires the `test-util`
++        /// feature and the current-thread runtime) in that it works in
++        /// production code and with any scheduler.
++        ///
++        /// # Arguments
++        ///
++        /// * `start_paused` - if `true`, the clock is paused immediately after
++        ///   construction so that the runtime is paused when `block_on` starts.
++        /// * `elapsed_time` - an initial offset to seed the pausable clock
++        ///   with. This is useful if the runtime is resuming from a previously
++        ///   persisted state and callers want [`Runtime::elapsed_millis`] to
++        ///   continue from a specific value.
++        ///
++        /// # Examples
++        ///
++        /// ```
++        /// # #[cfg(not(target_family = "wasm"))]
++        /// # {
++        /// use std::time::Duration;
++        /// use tokio::runtime;
++        ///
++        /// let rt = runtime::Builder::new_current_thread()
++        ///     .enable_time()
++        ///     .pausable_time(true, Duration::from_secs(0))
++        ///     .build()
++        ///     .unwrap();
++        ///
++        /// assert!(rt.is_paused());
++        /// # }
++        /// ```
++        ///
++        /// [`Runtime::pause`]: crate::runtime::Runtime::pause
++        /// [`Runtime::resume`]: crate::runtime::Runtime::resume
++        /// [`Runtime::elapsed_millis`]: crate::runtime::Runtime::elapsed_millis
++        pub fn pausable_time(
++            &mut self,
++            start_paused: bool,
++            elapsed_time: Duration,
++        ) -> &mut Self {
++            self.pausable_time_cfg = Some(crate::runtime::PausableTimeConfig {
++                start_paused,
++                elapsed_time,
++            });
++            self
++        }
++    }
++}
++
+ cfg_rt_multi_thread! {
+     impl Builder {
+         fn build_threaded_runtime(&mut self) -> io::Result<Runtime> {
+diff --git a/tokio/src/runtime/driver.rs b/tokio/src/runtime/driver.rs
+index 92b2350d..06226ff9 100644
+--- a/tokio/src/runtime/driver.rs
++++ b/tokio/src/runtime/driver.rs
+@@ -39,6 +39,11 @@ pub(crate) struct Cfg {
+     pub(crate) enable_time: bool,
+     pub(crate) enable_pause_time: bool,
+     pub(crate) start_paused: bool,
++    /// Optional configuration for pausable time. When `Some`, the runtime's
++    /// clock is created from `pausable_clock` and supports being paused from
++    /// outside of test-util.
++    #[cfg(feature = "time")]
++    pub(crate) pausable_time_cfg: Option<crate::runtime::PausableTimeConfig>,
+     pub(crate) nevents: usize,
+     pub(crate) timer_flavor: crate::runtime::TimerFlavor,
+ }
+@@ -47,6 +52,15 @@ impl Driver {
+     pub(crate) fn new(cfg: Cfg) -> io::Result<(Self, Handle)> {
+         let (io_stack, io_handle, signal_handle) = create_io_stack(cfg.enable_io, cfg.nevents)?;
+ 
++        #[cfg(feature = "time")]
++        let clock = match cfg.pausable_time_cfg {
++            Some(pausable_cfg) => {
++                create_pausable_clock(pausable_cfg.start_paused, pausable_cfg.elapsed_time)
++            }
++            None => create_clock(cfg.enable_pause_time, cfg.start_paused),
++        };
++
++        #[cfg(not(feature = "time"))]
+         let clock = create_clock(cfg.enable_pause_time, cfg.start_paused);
+ 
+         let (time_driver, time_handle) =
+@@ -302,6 +316,11 @@ cfg_time! {
+         crate::time::Clock::new(enable_pausing, start_paused)
+     }
+ 
++    #[allow(dead_code)]
++    pub(crate) fn create_pausable_clock(start_paused: bool, elapsed_time: Duration) -> Clock {
++        crate::time::Clock::new_pausable(start_paused, elapsed_time)
++    }
++
+     fn create_time_driver(
+         enable: bool,
+         timer_flavor: crate::runtime::TimerFlavor,
+diff --git a/tokio/src/runtime/mod.rs b/tokio/src/runtime/mod.rs
+index b4449c47..802e5d87 100644
+--- a/tokio/src/runtime/mod.rs
++++ b/tokio/src/runtime/mod.rs
+@@ -430,6 +430,9 @@ cfg_time! {
+     #[cfg(all(tokio_unstable, feature = "rt-multi-thread"))]
+     pub(crate) mod time_alt;
+ 
++    mod pausable_time_config;
++    pub(crate) use pausable_time_config::PausableTimeConfig;
++
+     use std::task::{Context, Poll};
+     use std::pin::Pin;
+ 
+diff --git a/tokio/src/runtime/pausable_time_config.rs b/tokio/src/runtime/pausable_time_config.rs
+new file mode 100644
+index 00000000..86f5c4be
+--- /dev/null
++++ b/tokio/src/runtime/pausable_time_config.rs
+@@ -0,0 +1,19 @@
++use std::time::Duration;
++
++/// Configuration for a runtime that uses a pausable clock.
++///
++/// This is populated by [`Builder::pausable_time`](crate::runtime::Builder::pausable_time)
++/// and, when set, causes the runtime's clock to be backed by
++/// [`pausable_clock::PausableClock`], allowing it to be paused and resumed at
++/// runtime via [`Runtime::pause`](crate::runtime::Runtime::pause) /
++/// [`Runtime::resume`](crate::runtime::Runtime::resume).
++#[derive(Debug, Copy, Clone, Default)]
++pub(crate) struct PausableTimeConfig {
++    /// If `true`, the runtime starts with the clock already paused.
++    pub(crate) start_paused: bool,
++
++    /// Initial value of elapsed time reported by the clock. Using a non-zero
++    /// value is useful if the runtime is resuming from a previously persisted
++    /// state.
++    pub(crate) elapsed_time: Duration,
++}
+diff --git a/tokio/src/runtime/runtime.rs b/tokio/src/runtime/runtime.rs
+index b0091bc4..c7914516 100644
+--- a/tokio/src/runtime/runtime.rs
++++ b/tokio/src/runtime/runtime.rs
+@@ -494,6 +494,145 @@ impl Runtime {
+     }
+ }
+ 
++cfg_time! {
++    impl Runtime {
++        /// Returns the current instant according to the runtime's clock.
++        ///
++        /// When the runtime was constructed with [`Builder::pausable_time`],
++        /// this value does not advance while the runtime is paused.
++        ///
++        /// [`Builder::pausable_time`]: crate::runtime::Builder::pausable_time
++        pub fn now(&self) -> crate::time::Instant {
++            self.handle.inner.driver().clock().now()
++        }
++
++        /// Returns the number of milliseconds that have elapsed on the
++        /// pausable clock.
++        ///
++        /// # Panics
++        ///
++        /// Panics if the runtime was not constructed with
++        /// [`Builder::pausable_time`].
++        ///
++        /// [`Builder::pausable_time`]: crate::runtime::Builder::pausable_time
++        pub fn elapsed_millis(&self) -> u64 {
++            self.handle.inner.driver().clock().elapsed_millis()
++        }
++
++        /// Pauses the runtime's clock.
++        ///
++        /// Returns `true` if the call actually paused the clock, `false` if
++        /// the clock was already paused.
++        ///
++        /// # Panics
++        ///
++        /// Panics if the runtime was not constructed with
++        /// [`Builder::pausable_time`] (when `test-util` is disabled).
++        ///
++        /// [`Builder::pausable_time`]: crate::runtime::Builder::pausable_time
++        pub fn pause(&self) -> bool {
++            #[cfg(feature = "test-util")]
++            {
++                self.handle.inner.driver().clock().try_pause()
++            }
++            #[cfg(not(feature = "test-util"))]
++            {
++                self.handle.inner.driver().clock().pause()
++            }
++        }
++
++        /// Resumes the runtime's clock, returning `true` if the call actually
++        /// unpaused the clock.
++        ///
++        /// # Panics
++        ///
++        /// Panics if the runtime was not constructed with
++        /// [`Builder::pausable_time`] (when `test-util` is disabled).
++        ///
++        /// [`Builder::pausable_time`]: crate::runtime::Builder::pausable_time
++        pub fn resume(&self) -> bool {
++            #[cfg(feature = "test-util")]
++            {
++                self.handle.inner.driver().clock().try_resume()
++            }
++            #[cfg(not(feature = "test-util"))]
++            {
++                self.handle.inner.driver().clock().resume()
++            }
++        }
++
++        /// Returns whether the runtime's clock is currently paused.
++        pub fn is_paused(&self) -> bool {
++            self.handle.inner.driver().clock().is_paused()
++        }
++
++        /// Returns whether the runtime's clock is currently paused, using the
++        /// given atomic ordering when loading the paused flag.
++        ///
++        /// This is a lower-level alternative to [`Runtime::is_paused`] for
++        /// callers that need a specific memory ordering. For the non-pausable
++        /// clock the result is always `false`.
++        pub fn is_paused_ordered(&self, ordering: std::sync::atomic::Ordering) -> bool {
++            self.handle
++                .inner
++                .driver()
++                .clock()
++                .is_paused_ordered(ordering)
++        }
++
++        /// Blocks the current thread until the runtime's clock is resumed.
++        /// Returns immediately if the clock is already resumed or not
++        /// pausable.
++        pub fn wait_for_resume(&self) {
++            self.handle.inner.driver().clock().wait_for_resume()
++        }
++
++        /// Blocks the current thread until the runtime's clock is paused.
++        /// Returns immediately if the clock is already paused or not pausable.
++        pub fn wait_for_pause(&self) {
++            self.handle.inner.driver().clock().wait_for_pause()
++        }
++
++        /// Runs `action` atomically if the clock is currently paused. Returns
++        /// `None` if the clock is resumed when this is called.
++        pub fn run_if_paused<T, F>(&self, action: F) -> Option<T>
++        where
++            F: FnOnce() -> T,
++        {
++            self.handle.inner.driver().clock().run_if_paused(action)
++        }
++
++        /// Runs `action` atomically if the clock is currently resumed. Returns
++        /// `None` if the clock is paused when this is called.
++        pub fn run_if_resumed<T, F>(&self, action: F) -> Option<T>
++        where
++            F: FnOnce() -> T,
++        {
++            self.handle.inner.driver().clock().run_if_resumed(action)
++        }
++
++        /// Runs `action` while preventing the clock from being paused. If the
++        /// clock is paused when this is called, the call blocks until the
++        /// clock is resumed.
++        pub fn run_unpausable<T, F>(&self, action: F) -> T
++        where
++            F: FnOnce() -> T,
++        {
++            self.handle.inner.driver().clock().run_unpausable(action)
++        }
++
++        /// Runs `action` while preventing the clock from being resumed. If the
++        /// clock is running when this is called, the call blocks until the
++        /// clock is paused.
++        pub fn run_unresumable<T, F>(&self, action: F) -> T
++        where
++            F: FnOnce() -> T,
++        {
++            self.handle.inner.driver().clock().run_unresumable(action)
++        }
++    }
++}
++
+ impl Drop for Runtime {
+     fn drop(&mut self) {
+         match &mut self.scheduler {
+diff --git a/tokio/src/runtime/scheduler/current_thread/mod.rs b/tokio/src/runtime/scheduler/current_thread/mod.rs
+index f0b072d5..30387aca 100644
+--- a/tokio/src/runtime/scheduler/current_thread/mod.rs
++++ b/tokio/src/runtime/scheduler/current_thread/mod.rs
+@@ -818,10 +818,20 @@ impl CoreGuard<'_> {
+                     #[cfg(tokio_unstable)]
+                     let task_meta = task.task_meta();
+ 
++                    // When the runtime was built with pausable time, wrap task
++                    // execution with `run_unpausable` so that a task cannot be
++                    // suspended mid-poll by a call to `Runtime::pause`.
++                    #[cfg(feature = "time")]
++                    let clock = &context.handle.driver.clock;
++
+                     let (c, ()) = context.run_task(core, || {
+                         #[cfg(tokio_unstable)]
+                         context.handle.task_hooks.poll_start_callback(&task_meta);
+ 
++                        #[cfg(feature = "time")]
++                        clock.run_unpausable(|| task.run());
++
++                        #[cfg(not(feature = "time"))]
+                         task.run();
+ 
+                         #[cfg(tokio_unstable)]
+diff --git a/tokio/src/runtime/scheduler/multi_thread/worker.rs b/tokio/src/runtime/scheduler/multi_thread/worker.rs
+index ab3b38c3..ebba7ca6 100644
+--- a/tokio/src/runtime/scheduler/multi_thread/worker.rs
++++ b/tokio/src/runtime/scheduler/multi_thread/worker.rs
+@@ -663,6 +663,12 @@ impl Context {
+         // Make the core available to the runtime context
+         *self.core.borrow_mut() = Some(core);
+ 
++        // When the runtime was built with pausable time, wrap task
++        // execution with `run_unpausable` so that a task cannot be suspended
++        // mid-poll by a call to `Runtime::pause`.
++        #[cfg(feature = "time")]
++        let clock = &self.worker.handle.driver.clock;
++
+         // Run the task
+         coop::budget(|| {
+             // Unlike the poll time above, poll start callback is attached to the task id,
+@@ -673,6 +679,10 @@ impl Context {
+                 .task_hooks
+                 .poll_start_callback(&task_meta);
+ 
++            #[cfg(feature = "time")]
++            clock.run_unpausable(|| task.run());
++
++            #[cfg(not(feature = "time"))]
+             task.run();
+ 
+             #[cfg(tokio_unstable)]
+@@ -750,6 +760,10 @@ impl Context {
+                     .task_hooks
+                     .poll_start_callback(&task_meta);
+ 
++                #[cfg(feature = "time")]
++                clock.run_unpausable(|| task.run());
++
++                #[cfg(not(feature = "time"))]
+                 task.run();
+ 
+                 #[cfg(tokio_unstable)]
+diff --git a/tokio/src/runtime/time/mod.rs b/tokio/src/runtime/time/mod.rs
+index cecd5d0f..f0c46cee 100644
+--- a/tokio/src/runtime/time/mod.rs
++++ b/tokio/src/runtime/time/mod.rs
+@@ -281,6 +281,18 @@ impl Driver {
+ 
+     cfg_not_test_util! {
+         fn park_thread_timeout(&mut self, rt_handle: &driver::Handle, duration: Duration) {
++            let clock = rt_handle.clock();
++
++            // If the runtime was built with a pausable clock and the clock is
++            // currently paused, block until it is resumed rather than parking
++            // for the sleep's duration. Because the pausable clock does not
++            // advance while paused, the deadline stored in the wheel will be
++            // re-checked once the clock resumes.
++            if clock.pausable() && clock.is_paused() {
++                clock.wait_for_resume();
++                return;
++            }
++
+             self.park.park_timeout(rt_handle, duration);
+         }
+     }
+diff --git a/tokio/src/time/clock.rs b/tokio/src/time/clock.rs
+index adacb7c8..fc5a3597 100644
+--- a/tokio/src/time/clock.rs
++++ b/tokio/src/time/clock.rs
+@@ -7,22 +7,187 @@
+ //! configurable.
+ 
+ cfg_not_test_util! {
+-    use crate::time::{Instant};
+-
++    use crate::time::Instant;
++    use std::sync::Arc;
++    use std::sync::atomic::Ordering;
++    use std::time::Duration;
++    use pausable_clock::PausableClock;
++
++    /// A source of `Instant::now()` that can optionally be paused.
++    ///
++    /// When constructed via `Clock::new`, the clock is a no-op wrapper around
++    /// [`std::time::Instant::now`]. When constructed via
++    /// [`Clock::new_pausable`] (indirectly through the
++    /// [`Builder::pausable_time`](crate::runtime::Builder::pausable_time)
++    /// runtime builder method) the clock is backed by a
++    /// [`pausable_clock::PausableClock`] and the runtime's notion of time can
++    /// be paused and resumed by calling [`Runtime::pause`](crate::runtime::Runtime::pause)
++    /// and [`Runtime::resume`](crate::runtime::Runtime::resume).
+     #[derive(Debug, Clone)]
+-    pub(crate) struct Clock {}
++    pub(crate) struct Clock {
++        pausable: bool,
++        pausing_clock: Arc<PausableClock>,
++    }
+ 
+     pub(crate) fn now() -> Instant {
+         Instant::from_std(std::time::Instant::now())
+     }
+ 
+     impl Clock {
++        /// Returns `true` when the `test-util` feature is enabled. This is used
++        /// by the time driver to know whether it should call `advance` (which
++        /// is a test-only concept) or `wait_for_resume`.
++        #[allow(dead_code)]
++        pub(crate) fn is_test() -> bool {
++            false
++        }
++
+         pub(crate) fn new(_enable_pausing: bool, _start_paused: bool) -> Clock {
+-            Clock {}
++            Clock {
++                pausable: false,
++                pausing_clock: Arc::new(PausableClock::default()),
++            }
++        }
++
++        pub(crate) fn new_pausable(start_paused: bool, elapsed_time: Duration) -> Clock {
++            Clock {
++                pausable: true,
++                pausing_clock: Arc::new(PausableClock::new(elapsed_time, start_paused)),
++            }
++        }
++
++        /// Returns true when this clock can be paused/resumed.
++        pub(crate) fn pausable(&self) -> bool {
++            self.pausable
+         }
+ 
+         pub(crate) fn now(&self) -> Instant {
+-            now()
++            if self.pausable {
++                // `PausableInstant` converts into `std::time::Instant` via
++                // `From`. The conversion preserves the pausable clock's view
++                // of time so that the runtime sees the paused instant.
++                Instant::from_std(std::time::Instant::from(self.pausing_clock.now()))
++            } else {
++                now()
++            }
++        }
++
++        /// Returns the number of milliseconds elapsed since the pausable clock
++        /// was created. Panics if the clock is not pausable.
++        pub(crate) fn elapsed_millis(&self) -> u64 {
++            if self.pausable {
++                self.pausing_clock.now().elapsed_millis()
++            } else {
++                panic!("elapsed_millis is only supported on pausable clocks")
++            }
++        }
++
++        pub(crate) fn is_paused(&self) -> bool {
++            if self.pausable {
++                self.pausing_clock.is_paused()
++            } else {
++                false
++            }
++        }
++
++        pub(crate) fn is_paused_ordered(&self, ordering: Ordering) -> bool {
++            if self.pausable {
++                self.pausing_clock.is_paused_ordered(ordering)
++            } else {
++                false
++            }
++        }
++
++        pub(crate) fn pause(&self) -> bool {
++            if self.pausable {
++                self.pausing_clock.pause()
++            } else {
++                panic!("this runtime was not configured to be pausable. \
++                    Use `Builder::pausable_time` to enable pausable time.");
++            }
++        }
++
++        pub(crate) fn resume(&self) -> bool {
++            if self.pausable {
++                self.pausing_clock.resume()
++            } else {
++                panic!("this runtime was not configured to be pausable. \
++                    Use `Builder::pausable_time` to enable pausable time.");
++            }
++        }
++
++        /// Runs `action` while preventing the clock from being paused. If the
++        /// clock is paused when this is called, the call blocks until the
++        /// clock is resumed.
++        pub(crate) fn run_unpausable<T, F>(&self, action: F) -> T
++        where
++            F: FnOnce() -> T,
++        {
++            if self.pausable {
++                self.pausing_clock.run_unpausable(action)
++            } else {
++                action()
++            }
++        }
++
++        /// Runs `action` while preventing the clock from being resumed. If the
++        /// clock is running when this is called, the call blocks until the
++        /// clock is paused.
++        pub(crate) fn run_unresumable<T, F>(&self, action: F) -> T
++        where
++            F: FnOnce() -> T,
++        {
++            if self.pausable {
++                self.pausing_clock.run_unresumable(action)
++            } else {
++                // Running an unresumable action on a non-pausable clock would
++                // otherwise block forever since the clock can never be paused.
++                unreachable!(
++                    "run_unresumable called on non-pausable clock; this would block forever"
++                );
++            }
++        }
++
++        /// Runs `action` atomically if the clock is currently resumed,
++        /// returning `None` if the clock is paused.
++        pub(crate) fn run_if_resumed<T, F>(&self, action: F) -> Option<T>
++        where
++            F: FnOnce() -> T,
++        {
++            if self.pausable {
++                self.pausing_clock.run_if_resumed(action)
++            } else {
++                Some(action())
++            }
++        }
++
++        /// Runs `action` atomically if the clock is currently paused,
++        /// returning `None` if the clock is resumed.
++        pub(crate) fn run_if_paused<T, F>(&self, action: F) -> Option<T>
++        where
++            F: FnOnce() -> T,
++        {
++            if self.pausable {
++                self.pausing_clock.run_if_paused(action)
++            } else {
++                None
++            }
++        }
++
++        /// Blocks the current thread until the clock is resumed. If the clock
++        /// is not currently paused, or not pausable, this returns immediately.
++        pub(crate) fn wait_for_resume(&self) {
++            if self.pausable {
++                self.pausing_clock.wait_for_resume();
++            }
++        }
++
++        /// Blocks the current thread until the clock is paused. If the clock is
++        /// not pausable, this does nothing.
++        pub(crate) fn wait_for_pause(&self) {
++            if self.pausable {
++                self.pausing_clock.wait_for_pause();
++            }
+         }
+     }
+ }
+@@ -378,5 +543,126 @@ cfg_test_util! {
+ 
+             Instant::from_std(ret)
+         }
++
++        // Extra methods that mirror the `cfg_not_test_util` variant so that
++        // `Runtime` can expose a uniform pausability API regardless of the
++        // `test-util` feature. These generally defer to the existing
++        // test-util primitives or are no-ops where no equivalent exists.
++
++        #[allow(dead_code)]
++        pub(crate) fn is_test() -> bool {
++            true
++        }
++
++        #[allow(dead_code)]
++        pub(crate) fn new_pausable(start_paused: bool, _elapsed_time: Duration) -> Clock {
++            // When `test-util` is enabled we always run the test clock with
++            // pausability enabled so that `Runtime::pause` / `Runtime::resume`
++            // are available in tests.
++            Self::new(true, start_paused)
++        }
++
++        #[allow(dead_code)]
++        pub(crate) fn pausable(&self) -> bool {
++            let inner = self.inner.lock();
++            inner.enable_pausing
++        }
++
++        #[allow(dead_code)]
++        pub(crate) fn elapsed_millis(&self) -> u64 {
++            let inner = self.inner.lock();
++            let mut ret = inner.base;
++            if let Some(unfrozen) = inner.unfrozen {
++                ret += unfrozen.elapsed();
++            }
++            ret.duration_since(inner.base - inner.base.elapsed())
++                .as_millis() as u64
++        }
++
++        pub(crate) fn is_paused_ordered(&self, _ordering: crate::loom::sync::atomic::Ordering) -> bool {
++            self.is_paused()
++        }
++
++        // The trait's public `pause()` returns `Result<(), &'static str>` to
++        // match historical behavior; the runtime-level `pause` simply returns
++        // whether the call succeeded.
++        #[allow(dead_code)]
++        pub(crate) fn try_pause(&self) -> bool {
++            match self.pause() {
++                Ok(()) => true,
++                Err(_) => false,
++            }
++        }
++
++        #[allow(dead_code)]
++        pub(crate) fn try_resume(&self) -> bool {
++            let mut inner = self.inner.lock();
++            if inner.unfrozen.is_some() {
++                return false;
++            }
++            inner.unfrozen = Some(std::time::Instant::now());
++            true
++        }
++
++        pub(crate) fn is_paused(&self) -> bool {
++            let inner = self.inner.lock();
++            inner.unfrozen.is_none()
++        }
++
++        /// No-op stub for compatibility with the pausable_clock-backed
++        /// implementation. In test mode, no separate `run_unpausable` mechanism
++        /// is needed because `time::pause` is controlled by the user directly.
++        pub(crate) fn run_unpausable<T, F>(&self, action: F) -> T
++        where
++            F: FnOnce() -> T,
++        {
++            action()
++        }
++
++        #[allow(dead_code)]
++        pub(crate) fn run_unresumable<T, F>(&self, _action: F) -> T
++        where
++            F: FnOnce() -> T,
++        {
++            unreachable!("run_unresumable is not supported when `test-util` is enabled")
++        }
++
++        #[allow(dead_code)]
++        pub(crate) fn run_if_resumed<T, F>(&self, action: F) -> Option<T>
++        where
++            F: FnOnce() -> T,
++        {
++            if self.is_paused() {
++                None
++            } else {
++                Some(action())
++            }
++        }
++
++        #[allow(dead_code)]
++        pub(crate) fn run_if_paused<T, F>(&self, action: F) -> Option<T>
++        where
++            F: FnOnce() -> T,
++        {
++            if self.is_paused() {
++                Some(action())
++            } else {
++                None
++            }
++        }
++
++        #[allow(dead_code)]
++        pub(crate) fn wait_for_resume(&self) {
++            // The test-util clock has no blocking notification for resume.
++            // The time driver uses `can_auto_advance` + `advance` instead of
++            // calling `wait_for_resume` when the `test-util` feature is
++            // enabled, so this should never be reached.
++            unreachable!("wait_for_resume is not supported when `test-util` is enabled")
++        }
++
++        #[allow(dead_code)]
++        pub(crate) fn wait_for_pause(&self) {
++            unreachable!("wait_for_pause is not supported when `test-util` is enabled")
++        }
+     }
+ }

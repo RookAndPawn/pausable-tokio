@@ -1,0 +1,79 @@
+Rename the `tokio` crate to `pausable-tokio` and detach it from the
+workspace for publishing.
+
+This patch is intended to be the LAST patch applied, immediately before
+`cargo publish`. Apply order is:
+
+    0001-pausable-time-runtime.patch   (source code changes)
+    0002-pausable-time-deps.patch      (Cargo.toml: pausable_clock dep)
+    0003-pausable-time-tests.patch     (integration tests)
+    0004-rename-for-crates-io.patch    (this patch: crate name + detach)
+
+Keeping the rename in its own patch lets you build, test, and run the
+modified code under the original `tokio` name during development -- which
+matters because tokio's own internal tests reference `tokio::...` paths
+that would otherwise need rewriting.
+
+Four hunks together:
+
+  * `tokio/Cargo.toml` -- prepend an empty `[workspace]` section so cargo
+    treats this crate as its own workspace root. Decoupling it from the
+    parent workspace is required because the parent's other members
+    (`benches`, `tokio-util`, etc.) still path-depend on a crate named
+    literally `tokio` and break the moment we rename.
+  * `tokio/Cargo.toml` -- rename `name = "tokio"` to `name = "pausable-tokio"`.
+  * `tokio/Cargo.toml` -- drop the trailing `[lints] workspace = true`
+    block. Now that the crate is its own workspace root, that line
+    would cause `cargo` to look for a `[workspace.lints]` section in
+    *this* `Cargo.toml`, which doesn't exist. The lints aren't
+    important for the published artifact, so we just remove the block.
+  * Workspace `Cargo.toml` -- drop the `tokio` entry from `members` and
+    drop the `[patch.crates-io] tokio = { path = "tokio" }` line. The
+    other workspace members (benches, tokio-util, etc.) will pick up
+    `tokio` from crates.io if they're built after this patch. We leave
+    them in the workspace because the user might still want to e.g.
+    `cargo build -p tokio-util` after the rename.
+
+The cumulative effect: `cd tokio && cargo publish` works regardless of
+prior cargo state in the parent workspace; the rest of the workspace
+remains buildable in the post-rename state (it just uses upstream
+`tokio` instead of the local one).
+diff --git a/Cargo.toml b/Cargo.toml
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,7 +1,6 @@
+ [workspace]
+ resolver = "2"
+ members = [
+-  "tokio",
+   "tokio-macros",
+   "tokio-test",
+   "tokio-stream",
+@@ -16,7 +15,6 @@ members = [
+ ]
+ 
+ [patch.crates-io]
+-tokio = { path = "tokio" }
+ tokio-macros = { path = "tokio-macros" }
+ tokio-stream = { path = "tokio-stream" }
+ tokio-test = { path = "tokio-test" }
+diff --git a/tokio/Cargo.toml b/tokio/Cargo.toml
+--- a/tokio/Cargo.toml
++++ b/tokio/Cargo.toml
+@@ -1,5 +1,9 @@
++[workspace]
++# Detach this crate from the parent workspace so it can be published
++# standalone as `pausable-tokio`.
++
+ [package]
+-name = "tokio"
++name = "pausable-tokio"
+ # When releasing to crates.io:
+ # - Remove path dependencies (if any)
+ # - Update doc url
+@@ -191,5 +195,3 @@ allowed_external_types = [
+   "tokio_macros::*",
+ ]
+ 
+-[lints]
+-workspace = true
