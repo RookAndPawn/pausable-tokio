@@ -18,7 +18,8 @@ full workflow.
 ```
 .
 ├── README.md                # this file
-├── patches/                 # the patches + driver script
+├── release.sh               # end-to-end release driver
+├── patches/                 # the patches + apply driver
 │   ├── 0001-pausable-time-runtime.patch
 │   ├── 0002-pausable-time-deps.patch
 │   ├── 0003-pausable-time-tests.patch
@@ -48,24 +49,32 @@ cargo test -p tests-integration --release \
 
 ## Publishing to crates.io
 
-The crate is renamed to `pausable-tokio` only at publish time. From a
-clean submodule:
+There's a single end-to-end script that handles the whole release flow.
+Pass it the upstream tokio version you want to base the release on:
 
 ```sh
-./patches/apply.sh --with-rename
-cd tokio-upstream/tokio
-cargo publish --dry-run --allow-dirty   # sanity-check
-cargo publish --allow-dirty             # for real
+./release.sh 1.52.1
 ```
 
-If you've already been doing development with patches 0001-0003 applied
-and a populated `target/` dir, just add the rename:
+It walks through the workflow with phase markers and aborts on the
+first failure:
+
+1. Verify all four patches apply cleanly to `tokio-1.52.1`.
+2. Move the submodule to that ref and apply the patches.
+3. Commit the new submodule pointer in this repo (skipped if the
+   pointer is already there from a previous run).
+4. Run `cargo publish --dry-run` from inside the renamed crate.
+5. Prompt for confirmation, then run `cargo publish` for real.
+
+Useful flags:
 
 ```sh
-./patches/apply.sh --rename-only
-cd tokio-upstream/tokio
-cargo publish --allow-dirty
+./release.sh 1.52.1 --yes          # skip the y/N confirmation prompt
+./release.sh 1.52.1 --no-publish   # full dry-run, never call real publish
 ```
+
+If you'd rather drive the steps manually, see `patches/README.md` for
+the equivalent breakdown using `patches/apply.sh` directly.
 
 ## Updating to a new upstream tokio
 
