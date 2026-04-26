@@ -40,18 +40,21 @@ git submodule update --init --recursive
 
 ### Syncing to a new upstream tokio release
 
+The `--tokio-version` flag wraps the bump-and-apply round-trip into a
+single command. It:
+
+1. resets the submodule's working tree;
+2. fetches new tags from the submodule's `origin` remote if needed;
+3. checks out the requested tag (`1.53.0` is rewritten to
+   `tokio-1.53.0`; full tags, branches, and shas pass through verbatim);
+4. applies the requested patches on top.
+
 ```sh
-# Bump the submodule's pinned commit to the new tag.
-cd tokio-upstream
-git fetch
-git checkout tokio-1.53.0
-cd ..
+# Move to a new upstream and dry-run-check the patches.
+./patches/apply.sh --tokio-version 1.53.0 --check
 
-# See if the patches still apply on top of the new upstream.
-./patches/apply.sh --check
-
-# If they do: apply them and verify the build/tests still work.
-./patches/apply.sh
+# If they apply: actually apply them and verify the build/tests.
+./patches/apply.sh --tokio-version 1.53.0
 cd tokio-upstream
 cargo build -p tokio --features=full
 cargo test -p tests-integration --release \
@@ -59,9 +62,20 @@ cargo test -p tests-integration --release \
     -- --test-threads=1 --nocapture
 cd ..
 
-# Commit the submodule bump.
+# Commit the submodule pointer bump in this repo.
 git add tokio-upstream
 git commit -m "sync to tokio-1.53.0"
+```
+
+If you'd rather drive the submodule by hand, the equivalent of the
+single command above is:
+
+```sh
+cd tokio-upstream
+git fetch --tags
+git checkout tokio-1.53.0
+cd ..
+./patches/apply.sh --check
 ```
 
 If `--check` reports a patch that no longer applies, the fix workflow
@@ -127,20 +141,30 @@ dev.
 ## `apply.sh` reference
 
 ```text
-./apply.sh                  # 0001 + 0002 + 0003 (development state)
-./apply.sh --with-rename    # 0001 + 0002 + 0003 + 0004 (one-shot publish)
-./apply.sh --no-tests       # 0001 + 0002 only (minimal viable build)
-./apply.sh --rename-only    # 0004 only (use when 0001..0003 are
-                              already applied)
-./apply.sh --check          # `git apply --check` mode: don't apply,
-                              just verify hunks would land cleanly
-./apply.sh --reset          # `git reset --hard` the submodule first
-                              (discards uncommitted edits inside it),
-                              then apply requested patches
+./apply.sh                              # 0001 + 0002 + 0003 (dev state)
+./apply.sh --with-rename                # 0001..0004 (one-shot publish)
+./apply.sh --no-tests                   # 0001 + 0002 only
+./apply.sh --rename-only                # 0004 only (when 0001..0003
+                                          already applied)
+./apply.sh --check                      # `git apply --check` mode
+./apply.sh --reset                      # `git reset --hard` the
+                                          submodule first
+./apply.sh --tokio-version <ref>        # bump the submodule to <ref>
+                                          (e.g. `1.53.0`, full tag,
+                                          branch, or sha) and apply
+                                          patches on top. Implies
+                                          --reset.
 ```
 
-Combine flags freely: `./apply.sh --reset --with-rename` reapplies
-the entire fork from a clean submodule, ready to publish.
+Combine flags freely:
+
+* `./apply.sh --reset --with-rename` reapplies the entire fork from
+  the currently-pinned upstream, ready to publish.
+* `./apply.sh --tokio-version 1.53.0 --check` does a "would the
+  patches still apply if we bumped to 1.53.0?" probe. The submodule
+  is moved to the new tag whether the check succeeds or fails, so
+  inspect `git status` from the parent repo afterwards if you want
+  to commit (or roll back) the bump.
 
 ## Regenerating the patches
 

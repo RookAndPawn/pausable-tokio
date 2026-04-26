@@ -70,24 +70,29 @@ cargo publish --allow-dirty
 ## Updating to a new upstream tokio
 
 ```sh
+# Move the submodule to the new tag and apply patches in one step.
+# Accepts "1.53.0", "tokio-1.53.0", a branch name, or a commit sha.
+./patches/apply.sh --tokio-version 1.53.0 --check   # dry-run probe
+./patches/apply.sh --tokio-version 1.53.0           # actually apply
+
+# Verify nothing regressed.
 cd tokio-upstream
-git fetch
-git checkout tokio-1.53.0    # or whichever release tag
+cargo build -p tokio --features=full
+cargo test -p tests-integration --release \
+    --features=rt-time-pausable --test rt_pausable_time \
+    -- --test-threads=1
 cd ..
 
-./patches/apply.sh --check   # see whether the patches still apply
-
-# If they apply: commit the new submodule pointer.
+# Commit the new submodule pointer.
 git add tokio-upstream
 git commit -m "sync to tokio-1.53.0"
-
-# If they don't, fix the offending hunks (typically 0001 if upstream
-# rewrote runtime internals), regenerate the patches, then commit
-# both the submodule bump and the patch updates.
 ```
 
-See `patches/README.md` for the patch-by-patch breakdown, including
-how to regenerate them after a sync.
+If `--check` reports a patch that no longer applies (typically 0001
+if upstream rewrote runtime internals), fix the offending hunks by
+hand, regenerate the patches, and commit both the submodule bump and
+the updated patches together. See `patches/README.md` for the
+patch-by-patch breakdown and how to regenerate.
 
 ## What the patches do
 
