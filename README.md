@@ -139,11 +139,24 @@ tokio tag, use the top-level `release.sh`:
 ./release.sh 1.53.0                # interactive
 ./release.sh 1.53.0 --yes          # skip the y/N confirmation
 ./release.sh 1.53.0 --no-publish   # full dry-run, never publish
+./release.sh 1.53.0 --no-push      # publish but don't push commit/tag
 ```
 
-It walks through five phases (check, apply, commit, dry-run publish,
-real publish) and aborts on the first failure. See `patches/README.md`
-for the manual equivalent and the patch-by-patch breakdown.
+It walks through eight phases and aborts on the first failure:
+
+1. Verify all six patches apply cleanly to the requested upstream ref.
+2. Move the submodule to that ref and apply the patches (including the
+   rename + publish-metadata patches).
+3. Commit the new submodule pointer in this parent repo.
+4. `cargo publish --dry-run` from inside the renamed crate.
+5. Prompt for confirmation, then `cargo publish` for real.
+6. Reset the submodule's working tree (the patches are now baked into
+   the published artifact, no need to keep them lying around locally).
+7. Tag the release commit `pausable-tokio-v<version>`.
+8. Push the commit + tag to origin.
+
+See `patches/README.md` for the manual equivalent and the
+patch-by-patch breakdown.
 
 ## License
 
